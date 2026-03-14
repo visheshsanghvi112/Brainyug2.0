@@ -37,18 +37,23 @@ const submit = () => {
             {{ status }}
         </div>
 
+        <div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            Migrated account? If your account is marked for security reset, you will be asked to set a new password immediately after login.
+        </div>
+
         <form @submit.prevent="submit">
             <div>
-                <InputLabel for="email" value="Email" />
+                <InputLabel for="email" value="Email or Username" />
 
                 <TextInput
                     id="email"
-                    type="email"
+                    type="text"
                     class="mt-1 block w-full"
                     v-model="form.email"
                     required
                     autofocus
                     autocomplete="username"
+                    placeholder="Enter your email or username"
                 />
 
                 <InputError class="mt-2" :message="form.errors.email" />

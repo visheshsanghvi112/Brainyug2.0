@@ -37,6 +37,8 @@ class Franchisee extends Model
         'deactivated_at', 'rejection_reason',
         // Hierarchy
         'district_head_id', 'zone_head_id', 'state_head_id',
+        // Migration traceability
+        'legacy_source', 'legacy_franchise_id',
     ];
 
     protected $casts = [

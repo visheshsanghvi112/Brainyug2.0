@@ -23,7 +23,7 @@ class ShopVisitController extends Controller
             $query->where('franchisee_id', $user->franchisee_id);
         } elseif ($user->hasRole(['Super Admin', 'State Head'])) {
             // Sees all
-        } elseif ($user->hasRole(['Zone Head', 'District Head', 'Sister Head'])) {
+        } elseif ($user->isRegionalHead() || $user->isZonalHead() || $user->isDistrictHead()) {
             // Sees only franchisees they manage (via auditor responsibility)
             $query->where('auditor_id', $user->id);
         } else {
@@ -49,7 +49,7 @@ class ShopVisitController extends Controller
             $query->where('status', $request->status);
         }
 
-        $franchisees = $user->hasRole(['Super Admin', 'State Head'])
+        $franchisees = ($user->isAdmin() || $user->isStateHead())
             ? Franchisee::select('id', 'shop_name', 'shop_code')->where('status', 'active')->get()
             : collect();
 

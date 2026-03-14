@@ -64,7 +64,12 @@ function onProductChange(item) {
     item.mrp    = parseFloat(product.mrp) || 0;
     item.hsn_id = product.hsn_id || '';
     const hsn   = props.hsn_codes?.find(h => h.id == product.hsn_id);
-    if (hsn) item.gst_percent = parseFloat(hsn.gst_rate) || 0;
+    if (hsn) {
+        const cgst = parseFloat(hsn.cgst_percent) || 0;
+        const sgst = parseFloat(hsn.sgst_percent) || 0;
+        const igst = parseFloat(hsn.igst_percent) || 0;
+        item.gst_percent = igst > 0 ? igst : (cgst + sgst);
+    }
 }
 
 // ── Per-row calculations ───────────────────────────────────────────────────

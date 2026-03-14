@@ -22,7 +22,7 @@ class SupportTicketController extends Controller
         if ($user->franchisee_id) {
             // Franchisee only sees their own tickets
             $query->where('franchisee_id', $user->franchisee_id);
-        } elseif (!$user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head'])) {
+        } elseif (!$user->isAdmin() && !$user->isTerritoryHead()) {
             abort(403);
         }
 
@@ -44,7 +44,7 @@ class SupportTicketController extends Controller
         return Inertia::render('Tickets/Index', [
             'tickets' => $query->paginate(20)->withQueryString(),
             'filters' => $request->only(['status', 'priority', 'search', 'assigned_to_me']),
-            'isAdmin' => $user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head']),
+            'isAdmin' => $user->isAdmin() || $user->isTerritoryHead(),
         ]);
     }
 
@@ -95,14 +95,14 @@ class SupportTicketController extends Controller
             'replies.user:id,name',
         ]);
 
-        $adminUsers = $user->hasRole(['Super Admin'])
+        $adminUsers = $user->hasErpRole('Super Admin')
             ? User::role(['Super Admin', 'State Head'])->select('id', 'name')->get()
             : collect();
 
         return Inertia::render('Tickets/Show', [
             'ticket'     => $ticket,
             'adminUsers' => $adminUsers,
-            'isAdmin'    => $user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head']),
+            'isAdmin'    => $user->isAdmin() || $user->isTerritoryHead(),
         ]);
     }
 
@@ -122,7 +122,7 @@ class SupportTicketController extends Controller
         ]);
 
         // Auto-transition status
-        if ($user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head'])) {
+        if ($user->isAdmin() || $user->isTerritoryHead()) {
             if ($ticket->status === 'open') {
                 $ticket->update(['status' => 'in_progress']);
             }
@@ -134,7 +134,7 @@ class SupportTicketController extends Controller
     public function updateStatus(SupportTicket $ticket, Request $request)
     {
         $user = $request->user();
-        if (!$user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head'])) {
+        if (!$user->isAdmin() && !$user->isTerritoryHead()) {
             abort(403);
         }
 

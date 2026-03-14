@@ -4,7 +4,7 @@ import Pagination from '@/Components/Pagination.vue';
 import { Head, Link, router } from '@inertiajs/vue3';
 import { ref, watch } from 'vue';
 import {
-    MagnifyingGlassIcon, PlusIcon, PencilSquareIcon,
+    MagnifyingGlassIcon, PlusIcon, PencilSquareIcon, EyeIcon,
     TruckIcon
 } from '@heroicons/vue/24/outline';
 
@@ -115,12 +115,20 @@ watch(statusFilter, applyFilters);
                                     <span v-else class="inline-flex items-center rounded-full bg-gray-50 px-2.5 py-0.5 text-xs font-medium text-gray-600 border border-gray-200">Inactive</span>
                                 </td>
                                 <td class="whitespace-nowrap px-6 py-4 text-center">
-                                    <Link
-                                        :href="route('admin.suppliers.edit', s.id)"
-                                        class="inline-flex items-center rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-indigo-600 dark:hover:bg-gray-700 dark:hover:text-indigo-400 transition"
-                                    >
-                                        <PencilSquareIcon class="h-5 w-5" />
-                                    </Link>
+                                    <div class="inline-flex items-center gap-1">
+                                        <Link
+                                            :href="route('admin.suppliers.show', s.id)"
+                                            class="inline-flex items-center rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-sky-600 dark:hover:bg-gray-700 dark:hover:text-sky-400 transition"
+                                        >
+                                            <EyeIcon class="h-5 w-5" />
+                                        </Link>
+                                        <Link
+                                            :href="route('admin.suppliers.edit', s.id)"
+                                            class="inline-flex items-center rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-indigo-600 dark:hover:bg-gray-700 dark:hover:text-indigo-400 transition"
+                                        >
+                                            <PencilSquareIcon class="h-5 w-5" />
+                                        </Link>
+                                    </div>
                                 </td>
                             </tr>
                             <tr v-if="!suppliers.data?.length">

@@ -14,15 +14,18 @@ use App\Models\RackArea;
 use App\Http\Resources\ProductResource;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Style\Border;
-use Barryvdh\DomPDF\Facade\Pdf;
 
 class ProductController extends Controller
 {
@@ -58,14 +61,20 @@ class ProductController extends Controller
     {
         $validated = $this->validateProduct($request);
 
-        $validated['product_name'] = trim($validated['product_name']);
-        $validated['sku'] = Str::upper(trim($validated['sku']));
-        if (isset($validated['product_code'])) $validated['product_code'] = Str::upper(trim($validated['product_code']));
-        if (isset($validated['barcode'])) $validated['barcode'] = Str::upper(trim($validated['barcode']));
-
         DB::beginTransaction();
         try {
-            Product::create($validated);
+            $productData = $this->normalizeProductPayload(Arr::except($validated, $this->imageFieldNames()));
+
+            if (blank($productData['product_code'] ?? null)) {
+                $productData['product_code'] = $this->nextProductCode();
+            }
+
+            $product = Product::create($productData);
+            $images = $this->storeProductImages($request, $product, []);
+            if ($images !== []) {
+                $product->update(['images' => $images]);
+            }
+
             DB::commit();
             Log::info("Master Catalog: New Enterprise Product SKU Initialized via HO Admin.");
             return redirect()->route('admin.products.index')->with('success', 'Enterprise Master Catalog initialized securely.');
@@ -79,7 +88,7 @@ class ProductController extends Controller
     public function edit(Product $product)
     {
         return Inertia::render('Master/Products/CreateEdit', [
-            'product'       => $product,
+            'product'       => $this->productFormPayload($product),
             'companies'     => CompanyMaster::orderBy('name')->get(['id', 'name']),
             'categories'    => ItemCategory::orderBy('name')->get(['id', 'name']),
             'salts'         => SaltMaster::orderBy('name')->get(['id', 'name']),
@@ -93,14 +102,22 @@ class ProductController extends Controller
     {
         $validated = $this->validateProduct($request, $product->id);
 
-        $validated['product_name'] = trim($validated['product_name']);
-        $validated['sku'] = Str::upper(trim($validated['sku']));
-        if (isset($validated['product_code'])) $validated['product_code'] = Str::upper(trim($validated['product_code']));
-        if (isset($validated['barcode'])) $validated['barcode'] = Str::upper(trim($validated['barcode']));
-
         DB::beginTransaction();
         try {
-            $product->update($validated);
+            $currentImages = (array) ($product->images ?? []);
+            $productData = $this->normalizeProductPayload(Arr::except($validated, $this->imageFieldNames()));
+
+            if (blank($productData['product_code'] ?? null)) {
+                $productData['product_code'] = $product->product_code ?: $this->nextProductCode();
+            }
+
+            $product->update($productData);
+
+            $images = $this->storeProductImages($request, $product, $currentImages);
+            if ($images !== $currentImages) {
+                $product->update(['images' => $images === [] ? null : $images]);
+            }
+
             DB::commit();
             return redirect()->route('admin.products.index')->with('success', 'Enterprise Master Catalog synchronized correctly.');
         } catch (\Exception $e) {
@@ -166,11 +183,82 @@ class ProductController extends Controller
     }
 
     /**
+     * Build a lean export query so bulk exports don't load unnecessary columns.
+     */
+    private function filteredProductExportQuery(Request $request)
+    {
+        return Product::query()
+            ->select([
+                'id',
+                'product_name',
+                'sku',
+                'barcode',
+                'product_code',
+                'fast_search_index',
+                'unit_sms_code',
+                'packing_desc',
+                'unit',
+                'secondary_unit',
+                'conversion_factor',
+                'mrp',
+                'ptr',
+                'pts',
+                'rate_a',
+                'csr',
+                'is_active',
+                'company_id',
+                'category_id',
+                'salt_id',
+                'hsn_id',
+                'box_size_id',
+            ])
+            ->with([
+                'company:id,name',
+                'category:id,name',
+                'salt:id,name',
+                'hsn:id,hsn_code',
+                'boxSize:id,size_name',
+            ])
+            ->when($request->search, function ($query, $search) {
+                $words = array_filter(array_map('trim', preg_split('/\s+/', $search)));
+
+                if (empty($words)) {
+                    return;
+                }
+
+                $query->where(function ($q) use ($words) {
+                    foreach ($words as $word) {
+                        $like = '%' . $word . '%';
+
+                        $q->where(function ($inner) use ($like) {
+                            $inner->where('product_name', 'like', $like)
+                                ->orWhere('sku', 'like', $like)
+                                ->orWhere('barcode', 'like', $like)
+                                ->orWhere('product_code', 'like', $like)
+                                ->orWhere('fast_search_index', 'like', $like)
+                                ->orWhere('unit_sms_code', 'like', $like)
+                                ->orWhere('packing_desc', 'like', $like)
+                                ->orWhereHas('company', fn ($company) => $company->where('name', 'like', $like))
+                                ->orWhereHas('salt', fn ($salt) => $salt->where('name', 'like', $like))
+                                ->orWhereHas('hsn', fn ($hsn) => $hsn->where('hsn_code', 'like', $like));
+                        });
+                    }
+                });
+            })
+            ->when($request->category, fn ($query, $value) => $query->where('category_id', $value))
+            ->when($request->company, fn ($query, $value) => $query->where('company_id', $value))
+            ->when($request->status !== null && $request->status !== '', function ($query) use ($request) {
+                $query->where('is_active', (bool) $request->status);
+            })
+            ->orderBy('product_name');
+    }
+
+    /**
      * Export filtered product catalog as Excel (.xlsx).
      */
     public function exportExcel(Request $request)
     {
-        $products = $this->filteredProductQuery($request)->get();
+        $products = $this->filteredProductExportQuery($request)->get();
 
         $spreadsheet = new Spreadsheet();
         $sheet = $spreadsheet->getActiveSheet();
@@ -188,8 +276,7 @@ class ProductController extends Controller
         ];
 
         foreach ($headers as $colIdx => $header) {
-            $cell = $sheet->getCellByColumnAndRow($colIdx + 1, 1);
-            $cell->setValue($header);
+            $sheet->setCellValue([$colIdx + 1, 1], $header);
         }
         $sheet->getStyle('A1:Q1')->applyFromArray($headerStyle);
         $sheet->getRowDimension(1)->setRowHeight(28);
@@ -197,23 +284,23 @@ class ProductController extends Controller
         // Data rows
         $row = 2;
         foreach ($products as $idx => $product) {
-            $sheet->setCellValueByColumnAndRow(1, $row, $idx + 1);
-            $sheet->setCellValueByColumnAndRow(2, $row, $product->product_name);
-            $sheet->setCellValueByColumnAndRow(3, $row, $product->salt?->name ?? '—');
-            $sheet->setCellValueByColumnAndRow(4, $row, $product->company?->name ?? '—');
-            $sheet->setCellValueByColumnAndRow(5, $row, $product->category?->name ?? '—');
-            $sheet->setCellValueByColumnAndRow(6, $row, $product->hsn?->hsn_code ?? '—');
-            $sheet->setCellValueByColumnAndRow(7, $row, $product->packing_desc ?? '—');
-            $sheet->setCellValueByColumnAndRow(8, $row, $product->boxSize?->size_name ?? '—');
-            $sheet->setCellValueByColumnAndRow(9, $row, $product->unit ?? '—');
-            $sheet->setCellValueByColumnAndRow(10, $row, $product->secondary_unit ?? '—');
-            $sheet->setCellValueByColumnAndRow(11, $row, $product->conversion_factor);
-            $sheet->setCellValueByColumnAndRow(12, $row, (float) $product->mrp);
-            $sheet->setCellValueByColumnAndRow(13, $row, (float) $product->ptr);
-            $sheet->setCellValueByColumnAndRow(14, $row, (float) $product->pts);
-            $sheet->setCellValueByColumnAndRow(15, $row, (float) ($product->rate_a ?? 0));
-            $sheet->setCellValueByColumnAndRow(16, $row, (float) ($product->csr ?? 0));
-            $sheet->setCellValueByColumnAndRow(17, $row, $product->is_active ? 'Active' : 'Inactive');
+            $sheet->setCellValue([1,  $row], $idx + 1);
+            $sheet->setCellValue([2,  $row], $product->product_name);
+            $sheet->setCellValue([3,  $row], $product->salt?->name ?? '—');
+            $sheet->setCellValue([4,  $row], $product->company?->name ?? '—');
+            $sheet->setCellValue([5,  $row], $product->category?->name ?? '—');
+            $sheet->setCellValue([6,  $row], $product->hsn?->hsn_code ?? '—');
+            $sheet->setCellValue([7,  $row], $product->packing_desc ?? '—');
+            $sheet->setCellValue([8,  $row], $product->boxSize?->size_name ?? '—');
+            $sheet->setCellValue([9,  $row], $product->unit ?? '—');
+            $sheet->setCellValue([10, $row], $product->secondary_unit ?? '—');
+            $sheet->setCellValue([11, $row], $product->conversion_factor);
+            $sheet->setCellValue([12, $row], (float) $product->mrp);
+            $sheet->setCellValue([13, $row], (float) $product->ptr);
+            $sheet->setCellValue([14, $row], (float) $product->pts);
+            $sheet->setCellValue([15, $row], (float) ($product->rate_a ?? 0));
+            $sheet->setCellValue([16, $row], (float) ($product->csr ?? 0));
+            $sheet->setCellValue([17, $row], $product->is_active ? 'Active' : 'Inactive');
 
             // Alternating row color
             if ($idx % 2 === 1) {
@@ -258,22 +345,22 @@ class ProductController extends Controller
      */
     public function exportPdf(Request $request)
     {
-        $products = $this->filteredProductQuery($request)->get();
+        $products = $this->filteredProductExportQuery($request)->get();
 
-        $pdf = Pdf::loadView('exports.products-pdf', [
+        return response()->view('exports.products-pdf', [
             'products' => $products,
             'generatedAt' => now()->format('d M Y, h:i A'),
             'totalCount' => $products->count(),
-        ])->setPaper('a4', 'landscape');
-
-        return $pdf->download('ProductCatalog_' . now()->format('Y-m-d') . '.pdf');
+            'autoPrint' => true,
+        ]);
     }
 
     /**
      * Reusable massive Validation constraints for the 40+ parameter enterprise product builder.
      */
-    private function validateProduct(Request $request, $id = null)    {
-        return $request->validate([
+    private function validateProduct(Request $request, $id = null)
+    {
+        $validator = Validator::make($request->all(), [
             // Core Identity
             'category_id' => 'required|exists:item_categories,id',
             'company_id' => 'required|exists:company_masters,id',
@@ -282,14 +369,29 @@ class ProductController extends Controller
             'box_size_id' => 'nullable|exists:box_sizes,id',
             
             'product_name' => 'required|string|max:255',
-            'sku' => 'required|string|unique:products,sku' . ($id ? ',' . $id : ''),
-            'barcode' => 'nullable|string|max:255',
-            'product_code' => 'nullable|string|max:50',
+            'sku' => [
+                'required',
+                'string',
+                'max:255',
+                Rule::unique('products', 'sku')->ignore($id)->whereNull('deleted_at'),
+            ],
+            'barcode' => [
+                'nullable',
+                'string',
+                'max:255',
+                Rule::unique('products', 'barcode')->ignore($id)->whereNull('deleted_at'),
+            ],
+            'product_code' => [
+                'nullable',
+                'string',
+                'max:50',
+                Rule::unique('products', 'product_code')->ignore($id)->whereNull('deleted_at'),
+            ],
             'unit_sms_code' => 'nullable|string|max:100',
             'item_type' => 'nullable|string|max:255',
             'color_item_type' => 'nullable|string|max:255',
             'company_code' => 'nullable|string|max:100',
-            'product_type' => 'nullable|string|max:100',
+            'product_type' => ['nullable', 'string', 'max:100', Rule::in(['Normal', 'Prohibited'])],
             'ap_remark' => 'nullable|string',
 
             // Pricing Tiers (Legacy + Modern)
@@ -334,15 +436,57 @@ class ProductController extends Controller
             'csr' => 'nullable|numeric|min:0|max:100',
 
             // Warehouse Location Mapping
-            'rack_section_id' => 'nullable|integer|min:1',
-            'rack_area_id' => 'nullable|integer|min:1',
+            'rack_section_id' => 'nullable|integer|exists:rack_sections,id',
+            'rack_area_id' => 'nullable|integer|exists:rack_areas,id',
 
             // Display Flags
             'fast_search_index' => 'nullable|string|max:255',
             'is_active' => 'boolean',
             'hide' => 'boolean',
             'is_banned' => 'boolean',
+            // Merchandising
+            'image_front' => 'nullable|image|max:5120',
+            'image_back' => 'nullable|image|max:5120',
+            'image_left' => 'nullable|image|max:5120',
+            'image_right' => 'nullable|image|max:5120',
         ]);
+
+        $validator->after(function ($validator) use ($request) {
+            $minStock = (int) $request->input('min_stock_level', 0);
+            $maxStock = (int) $request->input('max_stock_level', 0);
+            $mrp = (float) $request->input('mrp', 0);
+
+            if ($maxStock > 0 && $minStock > $maxStock) {
+                $validator->errors()->add('max_stock_level', 'Max stock level must be greater than or equal to min stock level.');
+            }
+
+            foreach (['ptr', 'pts', 'cost', 'rate_a', 'rate_b', 'rate_c'] as $field) {
+                $value = $request->input($field);
+                if ($value !== null && $value !== '' && (float) $value > $mrp) {
+                    $validator->errors()->add($field, strtoupper(str_replace('_', ' ', $field)).' cannot exceed MRP.');
+                }
+            }
+
+            $rackSectionId = $request->integer('rack_section_id');
+            $rackAreaId = $request->integer('rack_area_id');
+
+            if ($rackAreaId && !$rackSectionId) {
+                $validator->errors()->add('rack_section_id', 'Rack section is required when a rack area is selected.');
+            }
+
+            if ($rackAreaId && $rackSectionId) {
+                $belongsToSection = RackArea::query()
+                    ->whereKey($rackAreaId)
+                    ->where('rack_section_id', $rackSectionId)
+                    ->exists();
+
+                if (!$belongsToSection) {
+                    $validator->errors()->add('rack_area_id', 'Selected rack area does not belong to the selected rack section.');
+                }
+            }
+        });
+
+        return $validator->validate();
     }
 
     // ─────────────────────────────────────────────────────
@@ -359,16 +503,20 @@ class ProductController extends Controller
     {
         $request->validate(['hsn_id' => 'required|integer|exists:hsn_masters,id']);
 
-        $hsn = HsnMaster::findOrFail($request->input('hsn_id'), ['id', 'hsn_code', 'gst_rate', 'description']);
-
-        $halfGst = round($hsn->gst_rate / 2, 2);
+        $hsn = HsnMaster::query()->findOrFail($request->input('hsn_id'), [
+            'id',
+            'hsn_code',
+            'cgst_percent',
+            'sgst_percent',
+            'igst_percent',
+        ]);
 
         return response()->json([
-            'hsn_id'   => $hsn->id,
+            'hsn_id' => $hsn->id,
             'hsn_code' => $hsn->hsn_code,
-            'igst'     => $hsn->gst_rate,
-            'sgst'     => $halfGst,
-            'cgst'     => $halfGst,
+            'igst' => (float) $hsn->igst_percent,
+            'sgst' => (float) $hsn->sgst_percent,
+            'cgst' => (float) $hsn->cgst_percent,
         ]);
     }
 
@@ -423,12 +571,16 @@ class ProductController extends Controller
             return response()->json([]);
         }
 
-        $products = Product::with('hsn:id,hsn_code,gst_rate')
+        $products = Product::with('hsn:id,hsn_code,cgst_percent,sgst_percent,igst_percent')
             ->where('is_active', true)
+            ->where('hide', false)
+            ->where('is_banned', false)
             ->where(function ($q) use ($term) {
                 $q->where('product_name', 'like', "%{$term}%")
                   ->orWhere('sku', 'like', "%{$term}%")
-                  ->orWhere('barcode', 'like', "%{$term}%");
+                  ->orWhere('barcode', 'like', "%{$term}%")
+                  ->orWhere('product_code', 'like', "%{$term}%")
+                  ->orWhere('fast_search_index', 'like', "%{$term}%");
             })
             ->select('id', 'product_name', 'sku', 'barcode', 'mrp', 'ptr', 'pts',
                      'rate_a', 'sgst', 'cgst', 'igst', 'hsn_id', 'packing_desc',
@@ -437,6 +589,194 @@ class ProductController extends Controller
             ->get();
 
         return response()->json($products);
+    }
+
+    private function normalizeProductPayload(array $payload): array
+    {
+        $stringFields = [
+            'product_name',
+            'sku',
+            'barcode',
+            'product_code',
+            'unit_sms_code',
+            'item_type',
+            'color_item_type',
+            'company_code',
+            'product_type',
+            'ap_remark',
+            'free_schema',
+            'unit',
+            'secondary_unit',
+            'packing_desc',
+            'fast_search_index',
+        ];
+
+        foreach ($stringFields as $field) {
+            if (!array_key_exists($field, $payload)) {
+                continue;
+            }
+
+            $payload[$field] = $this->normalizeNullableString($payload[$field]);
+        }
+
+        foreach (['sku', 'barcode', 'product_code', 'unit_sms_code', 'company_code'] as $field) {
+            if (!blank($payload[$field] ?? null)) {
+                $payload[$field] = Str::upper($payload[$field]);
+            }
+        }
+
+        foreach (['product_name', 'packing_desc', 'item_type', 'color_item_type', 'free_schema', 'ap_remark'] as $field) {
+            if (!blank($payload[$field] ?? null)) {
+                $payload[$field] = preg_replace('/\s+/', ' ', trim((string) $payload[$field]));
+            }
+        }
+
+        foreach ([
+            'company_id', 'category_id', 'salt_id', 'hsn_id', 'box_size_id', 'conversion_factor', 'min_stock_level',
+            'max_stock_level', 'reorder_quantity', 'shelflife', 'reorder_days', 'rack_section_id', 'rack_area_id',
+        ] as $field) {
+            if (array_key_exists($field, $payload)) {
+                $payload[$field] = $this->normalizeNullableInteger($payload[$field]);
+            }
+        }
+
+        foreach ([
+            'mrp', 'ptr', 'pts', 'cost', 'rate_a', 'rate_b', 'rate_c', 'p_rate_discount', 'item_special_discount',
+            'special_discount', 'quantity_discount', 'max_discount', 'min_margin_disc', 'general_discount', 'local_tax',
+            'central_tax', 'sgst', 'cgst', 'igst', 'csr',
+        ] as $field) {
+            if (array_key_exists($field, $payload)) {
+                $payload[$field] = $this->normalizeNullableDecimal($payload[$field]);
+            }
+        }
+
+        foreach (['is_active', 'is_loose_sellable', 'hide', 'is_banned'] as $field) {
+            $payload[$field] = (bool) ($payload[$field] ?? false);
+        }
+
+        if (blank($payload['fast_search_index'] ?? null)) {
+            $payload['fast_search_index'] = $this->buildFastSearchIndex($payload);
+        }
+
+        return $payload;
+    }
+
+    private function nextProductCode(): string
+    {
+        $nextNumber = (int) Product::withTrashed()
+            ->where('product_code', 'like', 'PRD-%')
+            ->selectRaw("MAX(CAST(SUBSTRING(product_code, 5) AS UNSIGNED)) as max_code")
+            ->value('max_code');
+
+        do {
+            $nextNumber++;
+            $code = 'PRD-' . str_pad((string) $nextNumber, 6, '0', STR_PAD_LEFT);
+        } while (Product::withTrashed()->where('product_code', $code)->exists());
+
+        return $code;
+    }
+
+    private function buildFastSearchIndex(array $payload): string
+    {
+        $parts = array_filter([
+            $payload['product_name'] ?? null,
+            $payload['sku'] ?? null,
+            $payload['barcode'] ?? null,
+            $payload['product_code'] ?? null,
+            $payload['unit_sms_code'] ?? null,
+            $payload['company_code'] ?? null,
+            $payload['packing_desc'] ?? null,
+            $payload['item_type'] ?? null,
+            $payload['color_item_type'] ?? null,
+        ], fn ($value) => !blank($value));
+
+        return Str::limit(implode(' | ', array_unique($parts)), 255, '');
+    }
+
+    private function storeProductImages(Request $request, Product $product, array $existingImages): array
+    {
+        $images = $existingImages;
+
+        foreach ($this->imageFieldNames() as $field) {
+            if (!$request->hasFile($field)) {
+                continue;
+            }
+
+            $position = Str::after($field, 'image_');
+            $newPath = $request->file($field)->store("products/{$product->id}", 'public');
+
+            if (!empty($images[$position])) {
+                Storage::disk('public')->delete($images[$position]);
+            }
+
+            $images[$position] = $newPath;
+        }
+
+        return array_filter($images);
+    }
+
+    private function imageFieldNames(): array
+    {
+        return ['image_front', 'image_back', 'image_left', 'image_right'];
+    }
+
+    private function productFormPayload(Product $product): array
+    {
+        $product->loadMissing(['rackArea:id,rack_section_id,name']);
+
+        $images = collect((array) ($product->images ?? []))
+            ->map(fn ($path, $position) => [
+                'path' => $path,
+                'url' => $this->resolveImageUrl($path),
+                'position' => $position,
+            ])
+            ->all();
+
+        return array_merge($product->toArray(), [
+            'images' => $images,
+        ]);
+    }
+
+    private function resolveImageUrl(?string $path): ?string
+    {
+        if (blank($path)) {
+            return null;
+        }
+
+        if (Str::startsWith($path, ['http://', 'https://'])) {
+            return $path;
+        }
+
+        return Storage::disk('public')->url($path);
+    }
+
+    private function normalizeNullableString(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+
+        return $value === '' ? null : $value;
+    }
+
+    private function normalizeNullableInteger(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return (int) $value;
+    }
+
+    private function normalizeNullableDecimal(mixed $value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return round((float) $value, 2);
     }
 }
 

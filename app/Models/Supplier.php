@@ -15,22 +15,20 @@ class Supplier extends Model
         'address', 'state_id', 'district_id', 'pincode',
         'gst_number', 'pan_number', 'dl_number',
         'bank_name', 'bank_account_number', 'bank_ifsc',
-        'credit_limit', 'credit_days', 'is_active',
+        'credit_limit', 'credit_days', 'supplier_type', 'notes', 'is_active',
     ];
 
     protected $casts = [
-        'supplier_type', 'is_active', 'notes',
-        'credit_days', 'credit_limit'
+        'is_active' => 'boolean',
+        'credit_days' => 'integer',
+        'credit_limit' => 'decimal:2',
     ];
-
-    public function getActivitylogOptions(): LogOptions
-    {
-        return LogOptions::defaults()->logOnly(['*'])->logOnlyDirty();
-    }
 
     public function state() { return $this->belongsTo(State::class); }
     public function district() { return $this->belongsTo(District::class); }
     public function purchaseInvoices() { return $this->hasMany(PurchaseInvoice::class); }
+    public function purchaseReturns() { return $this->hasMany(PurchaseReturn::class); }
+    public function financialLedgers() { return $this->morphMany(FinancialLedger::class, 'ledgerable'); }
 
     public function scopeActive($q) { return $q->where('is_active', true); }
 }

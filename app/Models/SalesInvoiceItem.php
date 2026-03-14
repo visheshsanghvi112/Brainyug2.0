@@ -10,6 +10,8 @@ class SalesInvoiceItem extends Model
 
     protected $casts = [
         'exp_date' => 'date',
+        'qty' => 'decimal:2',
+        'free_qty' => 'decimal:2',
         'mrp' => 'decimal:2',
         'rate' => 'decimal:2',
         'discount_percent' => 'decimal:2',

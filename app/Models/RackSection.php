@@ -11,8 +11,18 @@ class RackSection extends Model
 
     protected $guarded = ['id'];
 
+    public function allAreas()
+    {
+        return $this->hasMany(RackArea::class)->orderBy('name');
+    }
+
     public function areas()
     {
         return $this->hasMany(RackArea::class)->where('status', true)->orderBy('name');
+    }
+
+    public function products()
+    {
+        return $this->hasMany(Product::class);
     }
 }

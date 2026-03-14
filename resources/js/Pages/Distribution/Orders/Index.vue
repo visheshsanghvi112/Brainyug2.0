@@ -12,15 +12,17 @@ import {
 } from '@heroicons/vue/24/outline';
 import { ref, watch } from 'vue';
 import { Head, Link, router } from '@inertiajs/vue3';
-import { debounce } from 'lodash';
 
 const props = defineProps({
     orders: Object,
     filters: Object,
+    metrics: Object,
 });
 
 const search = ref(props.filters.search || '');
 const statusFilter = ref(props.filters.status || '');
+const queueFilter = ref(props.filters.queue || '');
+let filterDebounceTimer = null;
 
 const statusColors = {
     pending: 'bg-yellow-100 text-yellow-800 border-yellow-200',
@@ -31,13 +33,47 @@ const statusColors = {
     cancelled: 'bg-gray-100 text-gray-800 border-gray-200',
 };
 
-watch([search, statusFilter], debounce(([newSearch, newStatus]) => {
-    router.get(
-        route('admin.dist-orders.index'),
-        { search: newSearch, status: newStatus },
-        { preserveState: true, preserveScroll: true }
-    );
-}, 300));
+watch([search, statusFilter, queueFilter], ([newSearch, newStatus, newQueue]) => {
+    clearTimeout(filterDebounceTimer);
+    filterDebounceTimer = setTimeout(() => {
+        router.get(
+            route('admin.dist-orders.index'),
+            { search: newSearch, status: newStatus, queue: newQueue },
+            { preserveState: true, preserveScroll: true }
+        );
+    }, 300);
+});
+
+const queueCards = [
+    {
+        key: 'pending_orders',
+        label: 'Pending Bill Review',
+        hint: 'Orders waiting for batch/qty/rate approval',
+        tone: 'bg-amber-50 border-amber-200 text-amber-800',
+    },
+    {
+        key: 'pending_dispatch',
+        label: 'Pending Dispatch',
+        hint: 'Accepted bills waiting dispatch lock-in',
+        tone: 'bg-indigo-50 border-indigo-200 text-indigo-800',
+    },
+    {
+        key: 'payment_review',
+        label: 'Payment Review Queue',
+        hint: 'Pending submitted payments need HO action',
+        tone: 'bg-emerald-50 border-emerald-200 text-emerald-800',
+    },
+    {
+        key: 'open_work',
+        label: 'Open Workload',
+        hint: 'Pending + accepted + dispatched',
+        tone: 'bg-slate-50 border-slate-200 text-slate-800',
+    },
+];
+
+const setQueueFilter = (key) => {
+    queueFilter.value = queueFilter.value === key ? '' : key;
+};
 
 const formatCurrency = (amount) => {
     return new Intl.NumberFormat('en-IN', {
@@ -93,8 +129,27 @@ const formatDate = (dateString) => {
                             <option value="dispatched">Dispatched</option>
                             <option value="delivered">Delivered</option>
                             <option value="rejected">Rejected</option>
+                            <option value="cancelled">Cancelled</option>
                         </select>
                     </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+                    <button
+                        v-for="card in queueCards"
+                        :key="card.key"
+                        type="button"
+                        @click="setQueueFilter(card.key)"
+                        class="rounded-xl border p-4 text-left transition-all hover:shadow-sm"
+                        :class="[
+                            card.tone,
+                            queueFilter === card.key ? 'ring-2 ring-offset-1 ring-indigo-500' : ''
+                        ]"
+                    >
+                        <div class="text-xs font-semibold uppercase tracking-wide opacity-80">{{ card.label }}</div>
+                        <div class="text-2xl font-black mt-2">{{ metrics?.[card.key] ?? 0 }}</div>
+                        <div class="text-xs mt-1 opacity-80">{{ card.hint }}</div>
+                    </button>
                 </div>
 
                 <!-- Table -->
@@ -123,11 +178,14 @@ const formatDate = (dateString) => {
                                                     <Link :href="route('admin.dist-orders.show', order.id)">{{ order.order_number }}</Link>
                                                 </div>
                                                 <div class="text-xs text-gray-500 dark:text-gray-400">By: {{ order.user?.name }}</div>
+                                                <div v-if="Number(order.pending_payments_count) > 0" class="mt-1 inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">
+                                                    {{ order.pending_payments_count }} payment review pending
+                                                </div>
                                             </div>
                                         </div>
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap">
-                                        <div class="text-sm font-medium text-gray-900 dark:text-gray-200">{{ order.franchisee?.name }}</div>
+                                        <div class="text-sm font-medium text-gray-900 dark:text-gray-200">{{ order.franchisee?.shop_name }}</div>
                                         <div class="text-xs text-gray-500 dark:text-gray-400">{{ order.franchisee?.shop_code }}</div>
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">

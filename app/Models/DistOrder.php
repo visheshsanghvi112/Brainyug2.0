@@ -14,6 +14,7 @@ class DistOrder extends Model
         'dispatch_date' => 'date',
         'accepted_at' => 'datetime',
         'dispatched_at' => 'datetime',
+        'locked_at' => 'datetime',
     ];
 
     public function franchisee()
@@ -41,9 +42,19 @@ class DistOrder extends Model
         return $this->belongsTo(User::class, 'dispatched_by');
     }
 
+    public function lockedBy()
+    {
+        return $this->belongsTo(User::class, 'locked_by');
+    }
+
     public function commissions()
     {
         return $this->hasMany(Commission::class);
+    }
+
+    public function payments()
+    {
+        return $this->hasMany(DistOrderPayment::class)->latest('id');
     }
 
     /**

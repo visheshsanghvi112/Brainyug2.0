@@ -86,7 +86,7 @@ class OperationalController extends Controller
         
         $query = SupportTicket::with(['replies', 'creator:id,name']);
 
-        if ($user->hasRole('Franchisee') || $user->hasRole('Franchisee Staff')) {
+        if ($user->isFranchisee()) {
             $query->where('franchisee_id', $user->getEffectiveFranchiseeId());
         }
 

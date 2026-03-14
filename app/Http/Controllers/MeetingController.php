@@ -32,14 +32,14 @@ class MeetingController extends Controller
         return Inertia::render('Meetings/Index', [
             'meetings' => $query->paginate(20)->withQueryString(),
             'filters'  => $request->only(['status']),
-            'canCreate' => $user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head']),
+            'canCreate' => $user->isAdmin() || $user->isTerritoryHead(),
         ]);
     }
 
     public function create(Request $request)
     {
         $user = $request->user();
-        if (!$user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head'])) {
+        if (!$user->isAdmin() && !$user->isTerritoryHead()) {
             abort(403, 'Only territory heads and admins can schedule meetings.');
         }
 
@@ -57,7 +57,7 @@ class MeetingController extends Controller
     public function store(Request $request)
     {
         $user = $request->user();
-        if (!$user->hasRole(['Super Admin', 'State Head', 'Zone Head', 'District Head'])) {
+        if (!$user->isAdmin() && !$user->isTerritoryHead()) {
             abort(403);
         }
 
@@ -102,7 +102,7 @@ class MeetingController extends Controller
         $isInvolved = $meeting->created_by === $user->id
             || $meeting->attendees()->where('user_id', $user->id)->exists();
 
-        if (!$isInvolved && !$user->hasRole('Super Admin')) {
+        if (!$isInvolved && !$user->isSuperAdmin()) {
             abort(403);
         }
 
@@ -113,13 +113,13 @@ class MeetingController extends Controller
 
         return Inertia::render('Meetings/Show', [
             'meeting'   => $meeting,
-            'isCreator' => $meeting->created_by === $user->id || $user->hasRole('Super Admin'),
+            'isCreator' => $meeting->created_by === $user->id || $user->isSuperAdmin(),
         ]);
     }
 
     public function updateStatus(Meeting $meeting, Request $request)
     {
-        if ($meeting->created_by !== $request->user()->id && !$request->user()->hasRole('Super Admin')) {
+        if ($meeting->created_by !== $request->user()->id && !$request->user()->isSuperAdmin()) {
             abort(403);
         }
 

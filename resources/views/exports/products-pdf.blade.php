@@ -5,7 +5,7 @@
     <title>Product Catalog</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: DejaVu Sans, Arial, sans-serif; font-size: 9px; color: #333; }
+        body { font-family: Arial, sans-serif; font-size: 9px; color: #333; padding: 16px; }
         .header { text-align: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #1F4E79; }
         .header h1 { font-size: 18px; color: #1F4E79; margin-bottom: 2px; }
         .header .meta { font-size: 8px; color: #666; }
@@ -28,15 +28,25 @@
             font-size: 8px;
             vertical-align: top;
         }
-        tr:nth-child(even) td { background-color: #f7fafc; }
-        tr:hover td { background-color: #eef3f9; }
+        .row-even td { background-color: #f7fafc; }
         .product-name { font-weight: bold; max-width: 150px; word-wrap: break-word; }
         .salt-name { max-width: 120px; word-wrap: break-word; color: #555; }
         .badge-active { color: #16a34a; font-weight: bold; }
         .badge-inactive { color: #dc2626; font-weight: bold; }
         .footer { margin-top: 10px; text-align: center; font-size: 7px; color: #999; border-top: 1px solid #ddd; padding-top: 6px; }
         .page-break { page-break-after: always; }
+        @page { size: A4 landscape; margin: 10mm; }
+        @media print {
+            body { padding: 0; }
+        }
     </style>
+    @if(!empty($autoPrint))
+    <script>
+        window.addEventListener('load', function () {
+            window.print();
+        });
+    </script>
+    @endif
 </head>
 <body>
     <div class="header">
@@ -66,7 +76,30 @@
         </thead>
         <tbody>
             @foreach($products as $idx => $product)
-            <tr>
+            @if($idx > 0 && $idx % 50 === 0)
+            </tbody></table>
+            <div style="page-break-after: always;"></div>
+            <table>
+            <thead><tr>
+                <th class="center">SR</th>
+                <th>PRODUCT NAME</th>
+                <th>CONTENT / SALT</th>
+                <th>COMPANY</th>
+                <th>CATEGORY</th>
+                <th>HSN</th>
+                <th>PACKING</th>
+                <th>BOX SIZE</th>
+                <th class="center">CONV.</th>
+                <th class="right">MRP</th>
+                <th class="right">PTR</th>
+                <th class="right">PTS</th>
+                <th class="right">RATE A</th>
+                <th class="right">CSR</th>
+                <th class="center">STATUS</th>
+            </tr></thead>
+            <tbody>
+            @endif
+            <tr class="{{ $idx % 2 === 1 ? 'row-even' : '' }}">
                 <td class="center">{{ $idx + 1 }}</td>
                 <td class="product-name">{{ $product->product_name }}</td>
                 <td class="salt-name">{{ $product->salt?->name ?? '—' }}</td>

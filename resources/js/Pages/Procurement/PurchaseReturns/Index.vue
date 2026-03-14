@@ -1,5 +1,6 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
+import Pagination from '@/Components/Pagination.vue';
 import { Head, Link, router } from '@inertiajs/vue3';
 import { ref, watch } from 'vue';
 import {
@@ -145,18 +146,8 @@ const statusColors = {
                         </tbody>
                     </table>
                     </div><!-- overflow-x-auto -->
-                    <div v-if="returns.links?.length > 3" class="border-t border-gray-200 bg-gray-50 px-6 py-3 dark:border-gray-700 dark:bg-gray-900/50">
-                        <nav class="flex items-center justify-between">
-                            <p class="text-sm text-gray-500 dark:text-gray-400">
-                                Showing {{ returns.from }} to {{ returns.to }} of {{ returns.total }}
-                            </p>
-                            <div class="flex gap-1">
-                                <template v-for="(link, index) in (returns.links || []).filter(Boolean)" :key="link.label || `return-link-${index}`">
-                                    <Link v-if="link.url" :href="link.url" v-html="link.label" class="rounded-lg px-3 py-1.5 text-sm transition" :class="link.active ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-700'" preserve-state />
-                                    <span v-else v-html="link.label" class="rounded-lg px-3 py-1.5 text-sm text-gray-300 dark:text-gray-600" />
-                                </template>
-                            </div>
-                        </nav>
+                    <div class="border-t border-gray-200 bg-gray-50 px-6 py-3 dark:border-gray-700 dark:bg-gray-900/50">
+                        <Pagination :data="returns" />
                     </div>
                 </div>
             </div>

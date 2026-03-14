@@ -566,3 +566,71 @@ The real continuity requirement is:
 1. **Identity continuity** — users, franchisees, GPM codes, hierarchy
 2. **Operational continuity** — dashboards, order flow, billing/POS, permissions
 3. **Historical continuity** — archive/reference only unless a hard business reason exists
+
+---
+
+## 17. BATCH / OPENING STOCK MIGRATION STRATEGY (THE DARK ZONE)
+
+### The Core Problem
+Legacy pharma data has a time-gap problem: a 2-year-old purchase may hold stock with a 4-year expiry, meaning that batch is still live and valuable but has no trace in the new ERP if you only start fresh from go-live. Without seeding this into the new inventory ledger, the system will:
+- Show zero stock for batches still physically in the warehouse or at franchisee
+- Block dispatch orders (stock guard will reject)
+- Block POS sales if available-stock check is enforced
+- Be unable to process purchase returns against old batches
+- Lose cost/FIFO analysis for those batches
+
+### Legacy Tables Involved
+| Table | DB | What it holds |
+|---|---|---|
+| `tbl_stock` | pharmaer_pharmaerp | HO warehouse batch snapshot: product_id, batch_no, actual_stock, expiry, mfg, mrp |
+| `tbl_stock2` | pharmaer_pharmaerp | Alternate HO stock table (secondary rack) |
+| `pharma_tbl_stock` | genericp_franchisee | Franchisee-level batch stock snapshot per franch_id |
+| `purchase_challan_product` | both DBs | Purchase challan line items: batch, expiry, mfg, mrp, purchase_rate, GST %, qty |
+| `purchase_challan_vendor` | both DBs | Purchase challan headers: vendor_id, pur_date, entry_no, tax_type, franch_id |
+
+### Truth Source Hierarchy
+1. **Quantity truth** = `tbl_stock.actual_stock` / `pharma_tbl_stock.actual_stock` (last-known physical count)
+2. **Commercial truth** = latest matching `purchase_challan_product` row (purchase_rate, mrp, gst, expiry, mfg)
+3. **If purchase line missing** = use stock table's mrp/expiry, mark confidence as `stock_snapshot_only` for review
+
+### Migration Commands (both are idempotent and safe to re-run)
+
+**Step 1 — Opening stock batches (MUST run first):**
+```bash
+php artisan erp:migrate-legacy-opening-stock --ho-file=../pharmaer_pharmaerp.sql --fran-file=../genericp_franchisee.sql
+# Dry-run first:
+php artisan erp:migrate-legacy-opening-stock --ho-file=../pharmaer_pharmaerp.sql --dry-run
+```
+Creates `OPENING` entries in `inventory_ledgers`. Enriches batch commercial fields from `purchase_challan_product`. Prints reconciliation report: matched / stock-only / unknown-product anomalies.
+
+**Step 2 — Legacy purchase challan archive (read-only):**
+```bash
+php artisan erp:migrate-legacy-purchase-invoices --ho-file=../pharmaer_pharmaerp.sql --fran-file=../genericp_franchisee.sql
+# Single franchisee partial run:
+php artisan erp:migrate-legacy-purchase-invoices --ho-file=../pharmaer_pharmaerp.sql --franch-id=42
+```
+Creates `purchase_invoices` rows with `status='legacy'` (read-only; cannot be edited, approved, or cancelled via UI). Adds traceability columns: `legacy_challan_id`, `legacy_source`, `legacy_franchisee_id`.
+
+### What Each Row Produces
+- **Opening ledger row**: `transaction_type=OPENING`, `reference_type=legacy_stock`, `qty_in=actual_stock`
+- **Legacy invoice row**: `status=legacy`, `invoice_number=LEGACY-HO-{challan_id}` or `LEGACY-FRANCHISEE-{challan_id}`
+- **Legacy invoice items**: full batch commercial data (rate, mrp, gst, expiry, mfg, qty, discount)
+
+### Safety Properties
+- **Idempotent**: re-running skips already-imported rows (checks existing OPENING entries by product+batch+location+location_id)
+- **No live data contamination**: OPENING entries do not trigger any approval workflow or financial ledger entries
+- **Legacy invoices are non-editable**: `isLegacy()` method on model; controller guards block edit/update/approve/cancel
+- **Anomaly report**: unknown products, missing suppliers, franchisee lookup failures are reported, not silently discarded
+
+### What Remains Manual After Migration
+- **Reconciliation of `stock_snapshot_only` rows**: batches with no purchase line need a human to confirm the purchase_rate to use for FIFO/costing
+- **Expired batches**: `tbl_stock` may contain past-expiry batches with positive stock — these are imported but POS will block them at sale time
+- **Double-count risk**: if HO later enters a new purchase invoice for the same batch that was in opening stock, both will accumulate in the ledger; HO should audit each old batch before entering new purchase invoices for it
+- **Franchisee pharma_tbl_stock** only exists if the fran-file is provided; otherwise franchisee opening stock is skipped with a warning
+
+### Lookup / Reference Flow After Migration
+When a franchise user picks a product at POS or B2B cart:
+1. Rate comes from `Product.franchiseRate()` (product master rate_a → ptr → pts → mrp)
+2. Available batches come from `InventoryService.getProductStockAtLocation()` — which includes OPENING entries
+3. Purchase-line commercial data is accessible via `purchase_invoice_items` where `purchase_invoice.status = 'legacy'`
+4. For returns, the linked legacy invoice line provides the authoritative rate/GST instead of trusting client payload

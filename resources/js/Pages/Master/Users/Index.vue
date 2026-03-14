@@ -1,12 +1,53 @@
 <script setup>
-import { Head, Link } from '@inertiajs/vue3';
+import { Head, Link, router } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import Pagination from '@/Components/Pagination.vue';
 import { PlusIcon, PencilSquareIcon, TrashIcon } from '@heroicons/vue/24/outline';
+import { ref, watch } from 'vue';
 
-defineProps({
+const props = defineProps({
     users: Object,
     roles: Array,
+    filters: Object,
+});
+
+const search = ref(props.filters?.search || '');
+const role = ref(props.filters?.role || '');
+const status = ref(props.filters?.status || '');
+
+function applyFilters() {
+    router.get(route('admin.users.index'), {
+        search: search.value || undefined,
+        role: role.value || undefined,
+        status: status.value || undefined,
+    }, {
+        preserveState: true,
+        preserveScroll: true,
+        replace: true,
+    });
+}
+
+function impersonateUser(user) {
+    const reason = window.prompt(`Support access reason for ${user.name} (required):`);
+    if (reason === null) {
+        return;
+    }
+
+    const trimmed = reason.trim();
+    if (trimmed.length < 10) {
+        window.alert('Please enter at least 10 characters for audit reason.');
+        return;
+    }
+
+    router.post(route('admin.users.support-access', user.id), {
+        reason: trimmed,
+    });
+}
+
+let timer;
+watch(search, () => {
+    clearTimeout(timer);
+    timer = setTimeout(applyFilters, 250);
 });
 </script>
 
@@ -23,6 +64,32 @@ defineProps({
         </template>
 
         <div class="py-6 mx-auto max-w-7xl sm:px-6 lg:px-8">
+            <div class="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                <input
+                    v-model="search"
+                    type="text"
+                    placeholder="Search name, username, email, phone"
+                    class="rounded-lg border-gray-300 bg-white text-sm text-gray-900 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                />
+                <select
+                    v-model="role"
+                    @change="applyFilters"
+                    class="rounded-lg border-gray-300 bg-white text-sm text-gray-900 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                >
+                    <option value="">All Roles</option>
+                    <option v-for="item in roles" :key="item.id" :value="item.name">{{ item.name }}</option>
+                </select>
+                <select
+                    v-model="status"
+                    @change="applyFilters"
+                    class="rounded-lg border-gray-300 bg-white text-sm text-gray-900 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                >
+                    <option value="">All Status</option>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                </select>
+            </div>
+
             <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
                 <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
@@ -59,7 +126,8 @@ defineProps({
                                 </span>
                             </td>
                             <td class="px-6 py-4 text-sm text-gray-600 dark:text-gray-300">
-                                {{ user.franchisee?.shop_name || 'Head Office' }}
+                                <span v-if="user.franchisee">{{ user.franchisee.shop_name }} ({{ user.franchisee.shop_code || 'NO-CODE' }})</span>
+                                <span v-else>Head Office</span>
                             </td>
                             <td class="px-6 py-4 text-center">
                                 <span :class="user.is_active
@@ -73,6 +141,14 @@ defineProps({
                             </td>
                             <td class="px-6 py-4 text-right">
                                 <div class="flex items-center justify-end gap-1">
+                                    <button
+                                        v-if="$page.props.auth.user.roles?.includes('Super Admin') && $page.props.auth.user.id !== user.id"
+                                        type="button"
+                                        @click="impersonateUser(user)"
+                                        class="rounded-lg border border-amber-300 px-2.5 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-900/20"
+                                    >
+                                        Support Access
+                                    </button>
                                     <Link :href="route('admin.users.edit', user.id)" class="p-2 rounded-lg text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                                         <PencilSquareIcon class="w-4 h-4" />
                                     </Link>

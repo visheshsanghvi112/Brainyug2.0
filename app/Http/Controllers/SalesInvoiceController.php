@@ -18,7 +18,7 @@ class SalesInvoiceController extends Controller
         // Scope: Franchisee/Staff see only their shop's bills
         if ($user->franchisee_id) {
             $query->where('franchisee_id', $user->franchisee_id);
-        } elseif ($user->hasRole(['Super Admin', 'Payment Manager'])) {
+        } elseif ($user->isAdmin() || $user->isAccount()) {
             // Admin sees all — optionally filter by franchisee
             if ($request->filled('franchisee_id')) {
                 $query->where('franchisee_id', $request->franchisee_id);
@@ -117,7 +117,7 @@ class SalesInvoiceController extends Controller
 
         if ($user->franchisee_id) {
             $query->where('franchisee_id', $user->franchisee_id);
-        } elseif ($user->hasRole(['Super Admin', 'Payment Manager'])) {
+        } elseif ($user->isAdmin() || $user->isAccount()) {
             if ($request->filled('franchisee_id')) {
                 $query->where('franchisee_id', $request->franchisee_id);
             }
@@ -196,6 +196,21 @@ class SalesInvoiceController extends Controller
 
         return Inertia::render('POS/Invoices/Print', [
             'invoice' => $salesInvoice,
+            'printPreferences' => [
+                'receipt_layout' => data_get($user->preferences, 'receipt_layout', 'thermal'),
+                'auto_print_after_checkout' => (bool) data_get($user->preferences, 'auto_print_after_checkout', true),
+                'printer_type' => data_get($user->preferences, 'printer_type', 'thermal'),
+                'printer_connection' => data_get($user->preferences, 'printer_connection', 'system_spooler'),
+                'printer_paper_width' => data_get($user->preferences, 'printer_paper_width', '80mm'),
+                'printer_ip' => data_get($user->preferences, 'printer_ip'),
+                'printer_port' => (int) data_get($user->preferences, 'printer_port', 9100),
+                'printer_name' => data_get($user->preferences, 'printer_name'),
+                'printer_driver' => data_get($user->preferences, 'printer_driver', 'browser_native'),
+                'print_copies' => (int) data_get($user->preferences, 'print_copies', 1),
+                'auto_cut_receipt' => (bool) data_get($user->preferences, 'auto_cut_receipt', true),
+                'open_cash_drawer' => (bool) data_get($user->preferences, 'open_cash_drawer', false),
+                'epos_timeout_ms' => (int) data_get($user->preferences, 'epos_timeout_ms', 5000),
+            ],
         ]);
     }
 }

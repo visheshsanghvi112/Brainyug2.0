@@ -12,10 +12,20 @@ use Illuminate\Support\Str;
 
 class HsnMasterController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $hsnCodes = HsnMaster::orderBy('hsn_code')->paginate(15);
-        return Inertia::render('Master/Hsn/Index', ['hsnCodes' => $hsnCodes]);
+        $query = HsnMaster::orderBy('hsn_code');
+        if ($search = $request->input('search')) {
+            $query->where(function ($q) use ($search) {
+                $q->where('hsn_code', 'like', '%' . $search . '%')
+                  ->orWhere('hsn_name', 'like', '%' . $search . '%');
+            });
+        }
+        $hsnCodes = $query->paginate(15)->withQueryString();
+        return Inertia::render('Master/Hsn/Index', [
+            'hsnCodes' => $hsnCodes,
+            'filters'  => $request->only(['search']),
+        ]);
     }
 
     public function store(Request $request)

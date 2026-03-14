@@ -15,4 +15,9 @@ class RackArea extends Model
     {
         return $this->belongsTo(RackSection::class);
     }
+
+    public function products()
+    {
+        return $this->hasMany(Product::class);
+    }
 }

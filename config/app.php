@@ -56,6 +56,19 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Asset URL
+    |--------------------------------------------------------------------------
+    |
+    | This URL is used by the asset helper and Vite when generating URLs for
+    | compiled assets. Set ASSET_URL when the app is served from a subfolder
+    | (for example on XAMPP) to avoid /build/* 404 errors.
+    |
+    */
+
+    'asset_url' => env('ASSET_URL'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Timezone
     |--------------------------------------------------------------------------
     |

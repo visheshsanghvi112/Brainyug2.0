@@ -102,7 +102,7 @@ watch([category, company, status], applyFilters);
                             <ArrowDownTrayIcon class="h-4 w-4" />
                             <span class="hidden sm:inline">Excel</span>
                         </a>
-                        <a :href="exportUrl('pdf')" class="inline-flex items-center gap-1.5 rounded-lg border border-red-300 dark:border-red-700 bg-white dark:bg-gray-800 px-3 py-2.5 text-sm font-medium text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors" title="Export PDF">
+                        <a :href="exportUrl('pdf')" target="_blank" rel="noopener" class="inline-flex items-center gap-1.5 rounded-lg border border-red-300 dark:border-red-700 bg-white dark:bg-gray-800 px-3 py-2.5 text-sm font-medium text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors" title="Open printable PDF export">
                             <ArrowDownTrayIcon class="h-4 w-4" />
                             <span class="hidden sm:inline">PDF</span>
                         </a>

@@ -23,4 +23,5 @@ class PurchaseReturn extends Model
     public function purchaseInvoice() { return $this->belongsTo(PurchaseInvoice::class); }
     public function items() { return $this->hasMany(PurchaseReturnItem::class); }
     public function createdBy() { return $this->belongsTo(User::class, 'created_by'); }
+    public function approvedBy() { return $this->belongsTo(User::class, 'approved_by'); }
 }

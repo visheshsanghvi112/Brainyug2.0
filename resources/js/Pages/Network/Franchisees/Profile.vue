@@ -1,14 +1,23 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import { Head, Link, router } from '@inertiajs/vue3';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import {
     BuildingStorefrontIcon, ArrowLeftIcon, CheckCircleIcon,
-    XCircleIcon, PlayIcon, PauseIcon, PencilSquareIcon
+    XCircleIcon, PlayIcon, PauseIcon, PencilSquareIcon, UserCircleIcon
 } from '@heroicons/vue/24/outline';
 
 const props = defineProps({
     franchisee: Object,
+    indexRoute: { type: String, default: 'admin.franchisees.index' },
+    approveRoute: { type: String, default: 'admin.franchise-registrations.approve' },
+    rejectRoute: { type: String, default: 'admin.franchise-registrations.reject' },
+    activateRoute: { type: String, default: 'admin.franchises.activate' },
+    suspendRoute: { type: String, default: 'admin.franchises.suspend' },
+    provisionRoute: { type: String, default: 'admin.franchises.provision-owner' },
+    contextMode: { type: String, default: 'network' },
+    allowEdit: { type: Boolean, default: true },
+    allowProvision: { type: Boolean, default: true },
 });
 
 const f = props.franchisee;
@@ -17,27 +26,60 @@ const rejectReason = ref('');
 const shopCode = ref(f.shop_code || '');
 const showRejectModal = ref(false);
 const showApproveModal = ref(false);
+const showProvisionModal = ref(false);
+const provisionForm = ref({
+    name: f.owner_name || '',
+    email: f.email || '',
+    username: f.shop_code || '',
+    phone: f.mobile || '',
+    password: '',
+});
+
+const linkedUsers = computed(() => f.users || []);
+const franchiseeRouteId = computed(() => f?.id ?? null);
+const franchiseEditHref = computed(() => {
+    if (!franchiseeRouteId.value) {
+        return null;
+    }
+
+    return route('admin.franchisees.edit', { franchisee: franchiseeRouteId.value });
+});
+
+const canProvisionOwner = computed(() => {
+    return props.allowProvision
+        && ['approved', 'active'].includes(f.status)
+        && !f.has_linked_user_account;
+});
 
 function approve() {
-    router.post(route('admin.franchisees.approve', f.id), {
+    router.post(route(props.approveRoute, f.id), {
         shop_code: shopCode.value,
     });
 }
 
 function reject() {
-    router.post(route('admin.franchisees.reject', f.id), {
+    router.post(route(props.rejectRoute, f.id), {
         rejection_reason: rejectReason.value,
     });
 }
 
 function activate() {
-    router.post(route('admin.franchisees.activate', f.id));
+    router.post(route(props.activateRoute, f.id));
 }
 
 function suspend() {
     if (confirm('Are you sure you want to suspend this franchisee?')) {
-        router.post(route('admin.franchisees.suspend', f.id));
+        router.post(route(props.suspendRoute, f.id));
     }
+}
+
+function provisionOwner() {
+    router.post(route(props.provisionRoute, f.id), provisionForm.value, {
+        onSuccess: () => {
+            showProvisionModal.value = false;
+            provisionForm.value.password = '';
+        },
+    });
 }
 
 const statusColors = {
@@ -110,7 +152,7 @@ const infoSections = [
         title: 'Hierarchy',
         items: [
             { label: 'District Head', value: f.district_head?.name },
-            { label: 'Zone Head', value: f.zone_head?.name },
+            { label: 'Zonal Head', value: f.zone_head?.name },
             { label: 'State Head', value: f.state_head?.name },
             { label: 'Approved By', value: f.approved_by?.name },
         ]
@@ -124,7 +166,7 @@ const infoSections = [
         <template #header>
             <div class="flex items-center justify-between">
                 <div class="flex items-center gap-4">
-                    <Link :href="route('admin.franchisees.index')" class="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300 transition">
+                    <Link :href="route(indexRoute)" class="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300 transition">
                         <ArrowLeftIcon class="h-5 w-5" />
                     </Link>
                     <div>
@@ -137,7 +179,8 @@ const infoSections = [
                         {{ f.status }}
                     </span>
                     <Link
-                        :href="route('admin.franchisees.edit', f.id)"
+                        v-if="allowEdit && franchiseEditHref"
+                        :href="franchiseEditHref"
                         class="inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm ring-1 ring-gray-300 hover:bg-gray-50 dark:bg-gray-700 dark:text-gray-200 dark:ring-gray-600 dark:hover:bg-gray-600 transition"
                     >
                         <PencilSquareIcon class="h-4 w-4" /> Edit
@@ -188,6 +231,49 @@ const infoSections = [
                             class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 transition">
                             <PlayIcon class="h-5 w-5" /> Re-Activate
                         </button>
+
+                        <button v-if="canProvisionOwner"
+                            @click="showProvisionModal = true"
+                            class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 transition">
+                            <UserCircleIcon class="h-5 w-5" /> Provision ERP Owner
+                        </button>
+                    </div>
+                </div>
+
+                <div class="rounded-xl bg-white p-6 shadow-lg ring-1 ring-gray-200 dark:bg-gray-800 dark:ring-gray-700">
+                    <div class="flex items-center justify-between gap-4">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Linked ERP Users</h3>
+                            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                                Preserve user identity and franchise linkage here. Old billing history stays outside runtime, but user access should not be rebuilt from scratch.
+                            </p>
+                        </div>
+                        <span
+                            :class="f.has_linked_user_account ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'"
+                            class="rounded-full px-3 py-1 text-xs font-semibold"
+                        >
+                            {{ f.has_linked_user_account ? 'Identity linked' : 'Provision pending' }}
+                        </span>
+                    </div>
+
+                    <div v-if="linkedUsers.length" class="mt-4 space-y-3">
+                        <div
+                            v-for="user in linkedUsers"
+                            :key="user.id"
+                            class="flex items-center justify-between rounded-lg border border-gray-100 px-4 py-3 dark:border-gray-700"
+                        >
+                            <div>
+                                <div class="text-sm font-medium text-gray-900 dark:text-white">{{ user.name }}</div>
+                                <div class="text-xs text-gray-500 dark:text-gray-400">{{ user.email }}</div>
+                            </div>
+                            <span class="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+                                Linked
+                            </span>
+                        </div>
+                    </div>
+
+                    <div v-else class="mt-4 rounded-lg border border-dashed border-amber-200 bg-amber-50/60 px-4 py-4 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
+                        No ERP user is linked to this franchise yet.
                     </div>
                 </div>
 
@@ -263,6 +349,41 @@ const infoSections = [
                     <div class="flex justify-end gap-3">
                         <button @click="showRejectModal = false" class="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">Cancel</button>
                         <button @click="reject" :disabled="!rejectReason" class="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-50">Reject</button>
+                    </div>
+                </div>
+            </div>
+        </Teleport>
+
+        <!-- Provision Owner Modal -->
+        <Teleport to="body">
+            <div v-if="showProvisionModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click.self="showProvisionModal = false">
+                <div class="w-full max-w-lg rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-800">
+                    <h3 class="mb-4 text-lg font-semibold text-gray-900 dark:text-white">Provision ERP Owner</h3>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div class="sm:col-span-2">
+                            <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Name</label>
+                            <input v-model="provisionForm.name" type="text" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white" />
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Email</label>
+                            <input v-model="provisionForm.email" type="email" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white" />
+                        </div>
+                        <div>
+                            <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Username</label>
+                            <input v-model="provisionForm.username" type="text" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white" />
+                        </div>
+                        <div>
+                            <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Phone</label>
+                            <input v-model="provisionForm.phone" type="text" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white" />
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Temporary Password</label>
+                            <input v-model="provisionForm.password" type="password" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white" />
+                        </div>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3">
+                        <button @click="showProvisionModal = false" class="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">Cancel</button>
+                        <button @click="provisionOwner" :disabled="!provisionForm.email || !provisionForm.password" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50">Provision</button>
                     </div>
                 </div>
             </div>

@@ -89,7 +89,7 @@ const toggleTheme = (theme) => {
                         </div>
                     </div>
 
-                    <div class="grid gap-4 border-t border-slate-200 dark:border-gray-700 bg-slate-50 dark:bg-gray-800/50 px-6 py-4 text-sm text-slate-600 dark:text-slate-400 sm:grid-cols-3 sm:px-8">
+                    <div class="grid gap-4 border-t border-slate-200 dark:border-gray-700 bg-slate-50 dark:bg-gray-800/50 px-6 py-4 text-sm text-slate-600 dark:text-slate-400 sm:grid-cols-4 sm:px-8">
                         <div>
                             <p class="font-medium text-slate-900 dark:text-slate-200">Profile</p>
                             <p class="mt-1">Update your personal and login identity information.</p>
@@ -102,6 +102,20 @@ const toggleTheme = (theme) => {
                             <p class="font-medium text-slate-900 dark:text-slate-200">Access</p>
                             <p class="mt-1">Your roles control which modules and reports you can open.</p>
                         </div>
+                        <div>
+                            <p class="font-medium text-slate-900 dark:text-slate-200">Operations</p>
+                            <p class="mt-1">Configure printer, receipt layout, and billing automations.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 shadow-sm">
+                    <div class="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wide">
+                        <a href="#profile-account" class="rounded-md bg-slate-100 px-3 py-2 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600">Account</a>
+                        <a href="#profile-preferences" class="rounded-md bg-slate-100 px-3 py-2 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600">Preferences</a>
+                        <a href="#profile-password" class="rounded-md bg-slate-100 px-3 py-2 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600">Password</a>
+                        <a href="#profile-2fa" class="rounded-md bg-slate-100 px-3 py-2 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600">2FA</a>
+                        <a href="#profile-danger" class="rounded-md bg-rose-100 px-3 py-2 text-rose-700 hover:bg-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-900/60">Danger Zone</a>
                     </div>
                 </section>
 
@@ -152,10 +166,25 @@ const toggleTheme = (theme) => {
                             </div>
                         </section>
 
-                        <section class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
+                        <section id="profile-account" class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
                             <div class="mb-6 border-b border-gray-100 dark:border-gray-700 pb-4">
                                 <p class="text-xs font-semibold uppercase tracking-[0.22em] text-indigo-600 dark:text-indigo-400">Account</p>
                                 <h3 class="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Profile information</h3>
+                            </div>
+
+                            <div class="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                <div class="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900">
+                                    <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Display Name</p>
+                                    <p class="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{{ user.name || 'N/A' }}</p>
+                                </div>
+                                <div class="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900">
+                                    <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Email</p>
+                                    <p class="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{{ user.email || 'N/A' }}</p>
+                                </div>
+                                <div class="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900">
+                                    <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Roles</p>
+                                    <p class="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{{ roles.length ? roles.join(', ') : 'User' }}</p>
+                                </div>
                             </div>
 
                             <UpdateProfileInformationForm
@@ -165,7 +194,7 @@ const toggleTheme = (theme) => {
                             />
                         </section>
 
-                        <section class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
+                        <section id="profile-preferences" class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
                             <div class="mb-6 border-b border-gray-100 dark:border-gray-700 pb-4">
                                 <p class="text-xs font-semibold uppercase tracking-[0.22em] text-indigo-600 dark:text-indigo-400">Settings</p>
                                 <h3 class="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Preferences & Notifications</h3>
@@ -174,7 +203,7 @@ const toggleTheme = (theme) => {
                             <PreferencesForm class="max-w-2xl" />
                         </section>
 
-                        <section class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
+                        <section id="profile-password" class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
                             <div class="mb-6 border-b border-gray-100 dark:border-gray-700 pb-4">
                                 <p class="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-600 dark:text-emerald-400">Security</p>
                                 <h3 class="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Password and sign-in</h3>
@@ -183,7 +212,7 @@ const toggleTheme = (theme) => {
                             <UpdatePasswordForm class="max-w-2xl" />
                         </section>
 
-                        <section class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
+                        <section id="profile-2fa" class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-6 shadow-sm sm:p-8">
                             <div class="mb-6 border-b border-gray-100 dark:border-gray-700 pb-4">
                                 <p class="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-600 dark:text-emerald-400">Security</p>
                                 <h3 class="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Multi-factor Authentication</h3>
@@ -195,15 +224,23 @@ const toggleTheme = (theme) => {
 
                     <div class="space-y-6">
                         <section class="rounded-2xl border border-amber-200 dark:border-amber-900 bg-amber-50/70 dark:bg-amber-950/30 p-6 shadow-sm">
-                            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-amber-700 dark:text-amber-500">Recommendations</p>
+                            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-amber-700 dark:text-amber-500">Operational Checklist</p>
                             <ul class="mt-4 space-y-3 text-sm text-amber-900 dark:text-amber-200/80">
-                                <li>Keep your email current so password resets and alerts reach the right inbox.</li>
-                                <li>Use a unique password for BrainYug ERP, especially on shared store systems.</li>
-                                <li>Review your assigned roles with an administrator if expected menus are missing.</li>
+                                <li>Set printer type and receipt layout before billing in a new branch.</li>
+                                <li>Enable desktop alerts for live POS and support activity.</li>
+                                <li>Use 2FA for users with order dispatch or stock adjustment access.</li>
+                                <li>Turn on low stock daily digest for purchase decision owners.</li>
                             </ul>
                         </section>
 
-                        <section class="rounded-2xl border border-rose-200 dark:border-rose-900 bg-white dark:bg-gray-800 p-6 shadow-sm">
+                        <section class="rounded-2xl border border-cyan-200 dark:border-cyan-900 bg-cyan-50/60 dark:bg-cyan-950/30 p-6 shadow-sm">
+                            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-700 dark:text-cyan-400">Automation Notes</p>
+                            <p class="mt-3 text-sm text-cyan-900 dark:text-cyan-100/80">
+                                Smart batch suggestion and auto-print settings are profile scoped and tuned for high-volume pharmacy counters.
+                            </p>
+                        </section>
+
+                        <section id="profile-danger" class="rounded-2xl border border-rose-200 dark:border-rose-900 bg-white dark:bg-gray-800 p-6 shadow-sm">
                             <div class="mb-6 border-b border-rose-100 dark:border-rose-900/50 pb-4">
                                 <p class="text-xs font-semibold uppercase tracking-[0.22em] text-rose-600 dark:text-rose-400">Danger zone</p>
                                 <h3 class="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Delete account</h3>

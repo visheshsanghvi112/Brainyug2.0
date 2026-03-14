@@ -87,6 +87,17 @@ class FranchiseeResource extends JsonResource
                 'id' => $this->approvedBy->id,
                 'name' => $this->approvedBy->name,
             ]),
+            'users_count' => $this->whenCounted('users'),
+            'has_linked_user_account' => $this->when(
+                isset($this->users_count) || $this->relationLoaded('users'),
+                fn () => ($this->relationLoaded('users') ? $this->users->count() : (int) $this->users_count) > 0,
+                false,
+            ),
+            'users' => $this->whenLoaded('users', fn() => $this->users->map(fn ($user) => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+            ])->values()),
             // Meta
             'created_at' => $this->created_at?->format('Y-m-d H:i'),
             'updated_at' => $this->updated_at?->format('Y-m-d H:i'),

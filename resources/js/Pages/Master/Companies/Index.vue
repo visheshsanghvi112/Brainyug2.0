@@ -3,10 +3,18 @@ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import Pagination from '@/Components/Pagination.vue';
 import { Head, useForm, router } from '@inertiajs/vue3';
 import { PencilIcon, TrashIcon, PlusIcon } from '@heroicons/vue/24/outline';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 
 const props = defineProps({
     companies: Object,
+});
+
+const companyRows = computed(() => {
+    const raw = Array.isArray(props.companies)
+        ? props.companies
+        : (props.companies?.data || []);
+
+    return raw.filter((co) => co && co.id);
 });
 
 const showModal = ref(false);
@@ -32,6 +40,10 @@ function openCreate() {
 }
 
 function openEdit(co) {
+    if (!co?.id) {
+        return;
+    }
+
     editing.value = co;
     form.name = co.name;
     form.address = co.address ?? '';
@@ -48,7 +60,7 @@ function openEdit(co) {
 
 function save() {
     if (editing.value) {
-        form.put(route('admin.companies.update', editing.value.id), {
+        form.put(route('admin.companies.update', { companyMaster: editing.value.id }), {
             onSuccess: () => { showModal.value = false; form.reset(); },
         });
     } else {
@@ -59,12 +71,16 @@ function save() {
 }
 
 function destroy(co) {
+    if (!co?.id) {
+        return;
+    }
+
     if (co.products_count > 0) {
         alert(`Cannot delete "${co.name}" — it has ${co.products_count} product(s) assigned.`);
         return;
     }
     if (confirm(`Delete company "${co.name}"?`)) {
-        router.delete(route('admin.companies.destroy', co.id));
+        router.delete(route('admin.companies.destroy', { companyMaster: co.id }));
     }
 }
 </script>
@@ -95,10 +111,10 @@ function destroy(co) {
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
-                    <tr v-if="!companies || !companies.length">
+                    <tr v-if="!companyRows.length">
                         <td colspan="5" class="text-center py-10 text-gray-400">No companies yet.</td>
                     </tr>
-                    <tr v-for="co in companies" :key="co.id" class="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                    <tr v-for="co in companyRows" :key="co.id" class="hover:bg-gray-50 dark:hover:bg-gray-700/30">
                         <td class="px-4 py-3">
                             <p class="text-sm font-medium text-gray-900 dark:text-white">{{ co.name }}</p>
                             <p v-if="co.address" class="text-xs text-gray-500 truncate max-w-xs">{{ co.address }}</p>

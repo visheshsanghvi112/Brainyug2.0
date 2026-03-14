@@ -2,12 +2,6 @@
 import { computed } from 'vue';
 import { Link } from '@inertiajs/vue3';
 
-/**
- * Universal Pagination Component
- * Handles null URLs safely — Inertia's <Link> crashes on href=null (first page prev / last page next).
- * Usage: <Pagination :data="products" />
- * `data` must be a Laravel paginator object with `links` array.
- */
 const props = defineProps({
     data: {
         type: Object,
@@ -17,67 +11,188 @@ const props = defineProps({
         type: Boolean,
         default: true,
     },
+    windowSize: {
+        type: Number,
+        default: 2,
+    },
 });
 
-const paginationLinks = computed(() => {
-    const rawLinks = props.data?.links ?? props.data?.meta?.links ?? [];
+function metaValue(key, fallback = null) {
+    if (props.data?.[key] !== undefined && props.data?.[key] !== null) {
+        return props.data[key];
+    }
 
-    if (!Array.isArray(rawLinks)) {
+    if (props.data?.meta?.[key] !== undefined && props.data?.meta?.[key] !== null) {
+        return props.data.meta[key];
+    }
+
+    return fallback;
+}
+
+const currentPage = computed(() => Number(metaValue('current_page', 1)));
+const lastPage = computed(() => Number(metaValue('last_page', 1)));
+const from = computed(() => Number(metaValue('from', 0)));
+const to = computed(() => Number(metaValue('to', 0)));
+const total = computed(() => Number(metaValue('total', 0)));
+
+const rawLinks = computed(() => {
+    const topLevelLinks = props.data?.links;
+    const metaLinks = props.data?.meta?.links;
+
+    if (Array.isArray(topLevelLinks)) {
+        return topLevelLinks;
+    }
+
+    if (Array.isArray(metaLinks)) {
+        return metaLinks;
+    }
+
+    return [];
+});
+
+const previousLink = computed(() => rawLinks.value[0]?.url ?? props.data?.prev_page_url ?? props.data?.meta?.prev_page_url ?? null);
+const nextLink = computed(() => rawLinks.value[rawLinks.value.length - 1]?.url ?? props.data?.next_page_url ?? props.data?.meta?.next_page_url ?? null);
+
+function pageUrl(page) {
+    const exactLink = rawLinks.value.find((link) => Number(link?.label) === page && link?.url);
+    if (exactLink) {
+        return exactLink.url;
+    }
+
+    const path = props.data?.path ?? props.data?.meta?.path;
+    if (!path) {
+        return null;
+    }
+
+    const query = new URLSearchParams(props.data?.meta?.query ?? {});
+    query.set('page', String(page));
+    const queryString = query.toString();
+    return queryString ? `${path}?${queryString}` : `${path}?page=${page}`;
+}
+
+const pageItems = computed(() => {
+    const totalPages = lastPage.value;
+    const page = currentPage.value;
+
+    if (totalPages <= 1) {
         return [];
     }
 
-    return rawLinks
-        .filter((link) => link && typeof link === 'object')
-        .map((link, index) => ({
-            key: `${link.label ?? 'page'}-${index}`,
-            label: link.label ?? '',
-            url: link.url ?? null,
-            active: Boolean(link.active),
-        }));
+    const pages = new Set([1, totalPages]);
+    const start = Math.max(1, page - props.windowSize);
+    const end = Math.min(totalPages, page + props.windowSize);
+
+    for (let index = start; index <= end; index += 1) {
+        pages.add(index);
+    }
+
+    const orderedPages = [...pages].sort((left, right) => left - right);
+    const items = [];
+
+    orderedPages.forEach((pageNumber, index) => {
+        if (index > 0 && pageNumber - orderedPages[index - 1] > 1) {
+            items.push({
+                key: `ellipsis-${orderedPages[index - 1]}-${pageNumber}`,
+                type: 'ellipsis',
+            });
+        }
+
+        items.push({
+            key: `page-${pageNumber}`,
+            type: 'page',
+            page: pageNumber,
+            active: pageNumber === page,
+            url: pageUrl(pageNumber),
+        });
+    });
+
+    return items;
 });
 
-const shouldRender = computed(() => paginationLinks.value.length > 3);
+const shouldRender = computed(() => lastPage.value > 1);
 </script>
 
 <template>
-    <div v-if="shouldRender" class="flex flex-wrap items-center justify-between gap-3 mt-4">
+    <div v-if="shouldRender" class="mt-4 border-t border-gray-100 px-4 py-4 dark:border-gray-700 sm:px-6">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+                Showing
+                <span class="font-semibold text-gray-700 dark:text-gray-200">{{ from }}</span>
+                –
+                <span class="font-semibold text-gray-700 dark:text-gray-200">{{ to }}</span>
+                of
+                <span class="font-semibold text-gray-700 dark:text-gray-200">{{ total }}</span>
+                results
+            </p>
 
-        <!-- Metadata -->
-        <p class="text-sm text-gray-500 dark:text-gray-400">
-            Showing
-            <span class="font-semibold text-gray-700 dark:text-gray-200">{{ data.from ?? data.meta?.from ?? 0 }}</span>
-            –
-            <span class="font-semibold text-gray-700 dark:text-gray-200">{{ data.to ?? data.meta?.to ?? 0 }}</span>
-            of
-            <span class="font-semibold text-gray-700 dark:text-gray-200">{{ data.total ?? data.meta?.total }}</span>
-            results
-        </p>
+            <nav class="max-w-full overflow-x-auto pb-1">
+                <div class="flex min-w-max items-center gap-1">
+                    <span
+                        v-if="!previousLink"
+                        class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-300 dark:border-gray-700 dark:text-gray-600"
+                    >
+                        &laquo; Previous
+                    </span>
+                    <Link
+                        v-else
+                        :href="previousLink"
+                        :preserve-state="preserveState"
+                        preserve-scroll
+                        class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 transition-colors hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-600 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-indigo-400"
+                    >
+                        &laquo; Previous
+                    </Link>
 
-        <!-- Page Buttons -->
-        <nav class="flex flex-wrap gap-1">
-            <template v-for="link in paginationLinks" :key="link.key">
-                <!-- Disabled: null URL (prev on first page, next on last page) -->
-                <span
-                    v-if="!link.url"
-                    class="px-3 py-1.5 rounded-lg text-sm border border-gray-200 dark:border-gray-700 text-gray-300 dark:text-gray-600 cursor-not-allowed select-none"
-                    v-html="link.label"
-                />
-                <!-- Active page -->
-                <span
-                    v-else-if="link.active"
-                    class="px-3 py-1.5 rounded-lg text-sm font-bold bg-indigo-600 text-white border border-indigo-600 select-none"
-                    v-html="link.label"
-                />
-                <!-- Navigable page -->
-                <Link
-                    v-else
-                    :href="link.url"
-                    :preserve-state="preserveState"
-                    preserve-scroll
-                    class="px-3 py-1.5 rounded-lg text-sm border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-indigo-50 dark:hover:bg-gray-700 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-200 transition-colors"
-                    v-html="link.label"
-                />
-            </template>
-        </nav>
+                    <template v-for="item in pageItems" :key="item.key">
+                        <span
+                            v-if="item.type === 'ellipsis'"
+                            class="rounded-lg border border-transparent px-3 py-1.5 text-sm text-gray-400 dark:text-gray-500"
+                        >
+                            ...
+                        </span>
+
+                        <span
+                            v-else-if="item.active"
+                            class="rounded-lg border border-indigo-600 bg-indigo-600 px-3 py-1.5 text-sm font-bold text-white"
+                        >
+                            {{ item.page }}
+                        </span>
+
+                        <span
+                            v-else-if="!item.url"
+                            class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-300 dark:border-gray-700 dark:text-gray-600"
+                        >
+                            {{ item.page }}
+                        </span>
+
+                        <Link
+                            v-else
+                            :href="item.url"
+                            :preserve-state="preserveState"
+                            preserve-scroll
+                            class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 transition-colors hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-600 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-indigo-400"
+                        >
+                            {{ item.page }}
+                        </Link>
+                    </template>
+
+                    <span
+                        v-if="!nextLink"
+                        class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-300 dark:border-gray-700 dark:text-gray-600"
+                    >
+                        Next &raquo;
+                    </span>
+                    <Link
+                        v-else
+                        :href="nextLink"
+                        :preserve-state="preserveState"
+                        preserve-scroll
+                        class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 transition-colors hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-600 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-indigo-400"
+                    >
+                        Next &raquo;
+                    </Link>
+                </div>
+            </nav>
+        </div>
     </div>
 </template>

@@ -26,15 +26,32 @@ class CartController extends Controller
             abort(403, 'You must be linked to a franchisee to access the cart.');
         }
 
-        $cart = B2bCart::with(['items.product'])
-            ->firstOrCreate([
-                'franchisee_id' => $franchiseeId,
-                'user_id' => $request->user()->id
-            ]);
+        $cart = B2bCart::firstOrCreate([
+            'franchisee_id' => $franchiseeId,
+            'user_id' => $request->user()->id,
+        ]);
+
+        $this->syncCartRates($cart);
+
+        $cart->load([
+            'items.product' => fn ($query) => $query->with(['hsn:id,hsn_code'])
+                ->select('id', 'product_name', 'sku', 'mrp', 'rate_a', 'ptr', 'pts', 'hsn_id'),
+        ]);
 
         return Inertia::render('B2b/Cart/Index', [
             'cart' => $cart,
-            'products' => Product::where('is_active', true)->get(['id', 'product_name', 'sku', 'rate_a', 'hsn_id'])
+            'products' => Product::query()
+                ->visibleForFranchise()
+                ->with(['hsn:id,hsn_code'])
+                ->orderBy('product_name')
+                ->get(['id', 'product_name', 'sku', 'rate_a', 'ptr', 'pts', 'mrp', 'hsn_id'])
+                ->map(function (Product $product) {
+                    $product->rate_a = $product->franchiseRate();
+                    $product->franchise_rate = $product->rate_a;
+
+                    return $product;
+                })
+                ->values(),
         ]);
     }
 
@@ -45,8 +62,14 @@ class CartController extends Controller
             'qty' => 'required|numeric|min:1',
         ]);
 
-        $product = Product::find($validated['product_id']);
+        $product = Product::query()
+            ->visibleForFranchise()
+            ->findOrFail($validated['product_id']);
         $franchiseeId = $request->user()->getEffectiveFranchiseeId();
+
+        if (!$franchiseeId) {
+            abort(403, 'You must be linked to a franchisee to place a B2B order.');
+        }
 
         $cart = B2bCart::firstOrCreate([
             'franchisee_id' => $franchiseeId,
@@ -54,26 +77,31 @@ class CartController extends Controller
         ]);
 
         // Standard rate logic mapping to legacy `rate_a` for franchisees
-        $rate = $product->rate_a;
+        $rate = $product->franchiseRate();
 
         $cartItem = $cart->items()->where('product_id', $product->id)->first();
 
-        // Very basic legacy free quantity rule: buy 10 get 1 free. Let's make it fixed configurable later.
-        $freeQty = 0;
-        if ($validated['qty'] >= 10) {
-            $freeQty = floor($validated['qty'] / 10);
-        }
+        $requestedQty = (float) $validated['qty'];
 
         if ($cartItem) {
-            $cartItem->increment('qty', $validated['qty']);
-            $cartItem->update(['total_amount' => $cartItem->qty * $rate]);
+            $newQty = round((float) $cartItem->qty + $requestedQty, 2);
+            $freeQty = $this->calculateFreeQty($newQty);
+
+            $cartItem->update([
+                'qty' => $newQty,
+                'free_qty' => $freeQty,
+                'rate' => $rate,
+                'total_amount' => round($newQty * $rate, 2),
+            ]);
         } else {
+            $freeQty = $this->calculateFreeQty($requestedQty);
+
             $cart->items()->create([
                 'product_id' => $product->id,
-                'qty' => $validated['qty'],
+                'qty' => $requestedQty,
                 'free_qty' => $freeQty, // Stored free qty here
                 'rate' => $rate,
-                'total_amount' => $validated['qty'] * $rate
+                'total_amount' => round($requestedQty * $rate, 2),
             ]);
         }
         
@@ -96,11 +124,21 @@ class CartController extends Controller
     public function checkout(Request $request)
     {
         $franchiseeId = $request->user()->getEffectiveFranchiseeId();
-        $cart = B2bCart::with('items.product')->where('user_id', $request->user()->id)->first();
+        if (!$franchiseeId) {
+            abort(403, 'You must be linked to a franchisee to place a B2B order.');
+        }
+
+        $cart = B2bCart::with('items.product.hsn')
+            ->where('user_id', $request->user()->id)
+            ->where('franchisee_id', $franchiseeId)
+            ->first();
 
         if (!$cart || $cart->items->isEmpty()) {
             return back()->with('error', 'Cart is empty. Add products to place an order.');
         }
+
+        $this->syncCartRates($cart);
+        $cart->load('items.product.hsn');
 
         DB::transaction(function () use ($cart, $franchiseeId, $request) {
             $order = DistOrder::create([
@@ -108,27 +146,51 @@ class CartController extends Controller
                 'franchisee_id' => $franchiseeId,
                 'user_id' => $request->user()->id,
                 'status' => 'pending',
-                'subtotal' => $cart->subtotal,
-                'total_amount' => $cart->total_amount,
+                'subtotal' => 0,
+                'sgst_amount' => 0,
+                'cgst_amount' => 0,
+                'igst_amount' => 0,
+                'total_amount' => 0,
             ]);
+
+            $subtotal = 0.0;
+            $taxTotal = 0.0;
 
             foreach ($cart->items as $item) {
                 // Base setup, GST / Discount rules apply in detail when HO accepts
                 $product = $item->product;
-                $gst = $product->hsn ? $product->hsn->gst_rate : 0;
+                if (!$product || !$product->is_active || $product->hide || $product->is_banned) {
+                    abort(422, 'Cart contains product(s) no longer available for franchise ordering. Please refresh the cart.');
+                }
+
+                $currentRate = $product->franchiseRate();
+                $gst = $product->gstPercent();
+                $taxableAmount = round((float) $item->qty * $currentRate, 2);
+                $gstAmount = round($taxableAmount * ($gst / 100), 2);
+                $lineTotal = round($taxableAmount + $gstAmount, 2);
+
+                $subtotal += $taxableAmount;
+                $taxTotal += $gstAmount;
                 
                 $order->items()->create([
                     'product_id' => $item->product_id,
                     'request_qty' => $item->qty,
                     'free_qty' => $item->free_qty ?? 0,
-                    'rate' => $item->rate,
+                    'rate' => $currentRate,
                     'mrp' => $product->mrp ?? 0,
                     'gst_percent' => $gst,
-                    'taxable_amount' => $item->total_amount,
-                    'gst_amount' => $item->total_amount * ($gst/100),
-                    'total_amount' => $item->total_amount + ($item->total_amount * ($gst/100)),
+                    'taxable_amount' => $taxableAmount,
+                    'gst_amount' => $gstAmount,
+                    'total_amount' => $lineTotal,
                 ]);
             }
+
+            $order->update([
+                'subtotal' => round($subtotal, 2),
+                'sgst_amount' => round($taxTotal / 2, 2),
+                'cgst_amount' => round($taxTotal / 2, 2),
+                'total_amount' => round($subtotal + $taxTotal, 2),
+            ]);
 
             // Flush cart
             $cart->items()->delete();
@@ -146,5 +208,57 @@ class CartController extends Controller
             'subtotal' => $subtotal,
             'total_amount' => $subtotal // Add GST calc here if needed inside cart directly
         ]);
+    }
+
+    private function syncCartRates(B2bCart $cart): void
+    {
+        $cart->loadMissing('items');
+
+        $visibleProducts = Product::query()
+            ->visibleForFranchise()
+            ->whereIn('id', $cart->items->pluck('product_id')->unique()->all())
+            ->get(['id', 'mrp', 'rate_a', 'ptr', 'pts'])
+            ->keyBy('id');
+
+        $updated = false;
+        foreach ($cart->items as $item) {
+            $product = $visibleProducts->get($item->product_id);
+
+            if (!$product) {
+                $item->delete();
+                $updated = true;
+                continue;
+            }
+
+            $currentRate = $product->franchiseRate();
+            $expectedTotal = round((float) $item->qty * $currentRate, 2);
+            $expectedFreeQty = $this->calculateFreeQty((float) $item->qty);
+
+            if (
+                (float) $item->rate !== $currentRate
+                || round((float) $item->total_amount, 2) !== $expectedTotal
+                || round((float) $item->free_qty, 2) !== $expectedFreeQty
+            ) {
+                $item->update([
+                    'rate' => $currentRate,
+                    'total_amount' => $expectedTotal,
+                    'free_qty' => $expectedFreeQty,
+                ]);
+                $updated = true;
+            }
+        }
+
+        if ($updated) {
+            $this->updateCartTotals($cart);
+        }
+    }
+
+    private function calculateFreeQty(float $qty): float
+    {
+        if ($qty < 10) {
+            return 0.0;
+        }
+
+        return (float) floor($qty / 10);
     }
 }

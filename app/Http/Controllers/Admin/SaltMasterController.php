@@ -11,10 +11,17 @@ use Illuminate\Support\Facades\Log;
 
 class SaltMasterController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $salts = SaltMaster::orderBy('name')->paginate(15);
-        return Inertia::render('Master/Salt/Index', ['salts' => $salts]);
+        $query = SaltMaster::orderBy('name');
+        if ($search = $request->input('search')) {
+            $query->where('name', 'like', '%' . $search . '%');
+        }
+        $salts = $query->paginate(15)->withQueryString();
+        return Inertia::render('Master/Salt/Index', [
+            'salts'   => $salts,
+            'filters' => $request->only(['search']),
+        ]);
     }
 
     public function store(Request $request)

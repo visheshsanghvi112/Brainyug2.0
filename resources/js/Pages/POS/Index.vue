@@ -123,7 +123,7 @@ const addItemFromBatch = (product, batch) => {
         alert("This bill is currently locked! Please unlock it to add items.");
         return;
     }
-    const gstPercent = (parseFloat(product.sgst || 0) + parseFloat(product.cgst || 0)) || parseFloat(product.igst || 0);
+    const gstPercent = parseFloat(product.gst_percent || 0);
     const existing = tabs.value[activeTab.value].find(i => i.product_id === product.id && i.batch_no === batch.batch_no);
     if (existing) {
         existing.qty++;
@@ -133,10 +133,12 @@ const addItemFromBatch = (product, batch) => {
             _id: Date.now(),
             product_id: product.id,
             product_name: product.product_name,
+            free_schema: product.free_schema || null,
             batch_no: batch.batch_no || '',
             expiry_date: batch.expiry_date || null,
             available_stock: parseFloat(batch.stock || 0),
             qty: 1,
+            free_qty: 0,
             mrp: parseFloat(batch.mrp || product.mrp),
             rate: parseFloat(product.rate_a || product.mrp),
             discount_percent: 0,
@@ -154,12 +156,25 @@ const addItemFromBatch = (product, batch) => {
 };
 
 const calcLine = (item) => {
+    const parseFreeSchema = (schema) => {
+        if (!schema || typeof schema !== 'string') return null;
+        const match = schema.trim().match(/^(\d+)\s*\+\s*(\d+)$/);
+        if (!match) return null;
+        const buyQty = Number(match[1]);
+        const freeQty = Number(match[2]);
+        if (buyQty <= 0 || freeQty <= 0) return null;
+        return { buyQty, freeQty };
+    };
+
     const base = parseFloat(item.rate) * parseFloat(item.qty);
     const disc = base * (parseFloat(item.discount_percent) / 100);
     item.discount_amount = disc;
     item.taxable_amount = base - disc;
     item.gst_amount = item.taxable_amount * (parseFloat(item.gst_percent) / 100);
     item.total_amount = item.taxable_amount + item.gst_amount;
+
+    const schema = parseFreeSchema(item.free_schema);
+    item.free_qty = schema ? Math.floor(Number(item.qty || 0) / schema.buyQty) * schema.freeQty : 0;
 };
 
 const updateItem = (item) => {
@@ -193,6 +208,21 @@ const cartTotals = computed(() => {
 
 // ── Customer ───────────────────────────────────────
 const lookingUpCustomer = ref(false);
+const creditInfoLoading = ref(false);
+const creditModalOpen = ref(false);
+const customerCredit = ref({
+    pending_credit: 0,
+    recent_bills: [],
+    recent_collections: [],
+});
+const creditCollectionForm = ref({
+    amount: '',
+    payment_mode: 'cash',
+    payment_date: new Date().toISOString().slice(0, 10),
+    transaction_no: '',
+    narration: '',
+});
+const creditSubmitting = ref(false);
 
 const lookupCustomer = async () => {
     if (currentCustomer.value.mobile.length < 8) return;
@@ -202,9 +232,85 @@ const lookupCustomer = async () => {
         if (res.data) {
             currentCustomer.value.id = res.data.id;
             currentCustomer.value.name = res.data.name;
+            await loadCustomerCreditInfo();
+        } else {
+            customerCredit.value = { pending_credit: 0, recent_bills: [], recent_collections: [] };
         }
     } catch {}
     lookingUpCustomer.value = false;
+};
+
+const loadCustomerCreditInfo = async () => {
+    if (!currentCustomer.value.id) {
+        customerCredit.value = { pending_credit: 0, recent_bills: [], recent_collections: [] };
+        return;
+    }
+
+    creditInfoLoading.value = true;
+    try {
+        const res = await axios.post(route('pos.customerCreditInfo'), {
+            customer_id: currentCustomer.value.id,
+        });
+        customerCredit.value = {
+            pending_credit: Number(res.data?.pending_credit || 0),
+            recent_bills: res.data?.recent_bills || [],
+            recent_collections: res.data?.recent_collections || [],
+        };
+    } catch {
+        customerCredit.value = { pending_credit: 0, recent_bills: [], recent_collections: [] };
+    } finally {
+        creditInfoLoading.value = false;
+    }
+};
+
+const openCreditCollectionModal = async () => {
+    if (!currentCustomer.value.id) {
+        alert('Select a customer first to collect outstanding credit.');
+        return;
+    }
+
+    await loadCustomerCreditInfo();
+
+    if ((customerCredit.value.pending_credit || 0) <= 0) {
+        alert('This customer has no pending credit balance.');
+        return;
+    }
+
+    creditCollectionForm.value.amount = Number(customerCredit.value.pending_credit).toFixed(2);
+    creditCollectionForm.value.payment_mode = 'cash';
+    creditCollectionForm.value.payment_date = new Date().toISOString().slice(0, 10);
+    creditCollectionForm.value.transaction_no = '';
+    creditCollectionForm.value.narration = '';
+    creditModalOpen.value = true;
+};
+
+const submitCreditCollection = async () => {
+    if (creditSubmitting.value || !currentCustomer.value.id) return;
+
+    creditSubmitting.value = true;
+    try {
+        const payload = {
+            customer_id: currentCustomer.value.id,
+            amount: Number(creditCollectionForm.value.amount || 0),
+            payment_mode: creditCollectionForm.value.payment_mode,
+            payment_date: creditCollectionForm.value.payment_date,
+            transaction_no: creditCollectionForm.value.transaction_no || null,
+            narration: creditCollectionForm.value.narration || null,
+        };
+
+        const res = await axios.post(route('pos.creditCollect'), payload);
+
+        customerCredit.value.pending_credit = Number(res.data?.pending_credit || 0);
+        customerCredit.value.recent_bills = res.data?.recent_bills || [];
+        customerCredit.value.recent_collections = res.data?.recent_collections || [];
+        creditModalOpen.value = false;
+        alert('Credit collected successfully.');
+    } catch (e) {
+        const msg = e?.response?.data?.message || 'Unable to collect credit right now.';
+        alert(msg);
+    } finally {
+        creditSubmitting.value = false;
+    }
 };
 
 // ── Doctor ─────────────────────────────────────────
@@ -280,6 +386,7 @@ const submitSale = async () => {
                 mrp: i.mrp,
                 rate: i.rate,
                 qty: i.qty,
+                free_qty: i.free_qty || 0,
                 discount_percent: i.discount_percent,
             })),
             payment_mode: paymentMode.value,
@@ -300,6 +407,7 @@ const submitSale = async () => {
             tabs.value[activeTab.value] = [];
             tabCustomers.value[activeTab.value] = emptyCustomerState();
             tabMeta.value[activeTab.value].locked = false;
+            customerCredit.value = { pending_credit: 0, recent_bills: [], recent_collections: [] };
             transactionNo.value = '';
             alert(`Bill ${res.data.bill_no} saved successfully!`);
             searchInput.value?.focus();
@@ -333,6 +441,7 @@ const handleKeyboard = (e) => {
     
     if (e.key === 'Escape') {
         if (batchModal.value.open) batchModal.value.open = false;
+        else if (creditModalOpen.value) creditModalOpen.value = false;
         else if (isCheckoutModalOpen.value) isCheckoutModalOpen.value = false;
         else searchQuery.value = '';
     }
@@ -425,7 +534,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
                             >
                                 <div>
                                     <div class="font-bold text-sm">{{ product.product_name }}</div>
-                                    <div class="text-xs text-gray-500 font-mono">{{ product.sku }} | GST: {{ (parseFloat(product.sgst||0)+parseFloat(product.cgst||0)||parseFloat(product.igst||0)) }}%</div>
+                                    <div class="text-xs text-gray-500 font-mono">{{ product.sku }} | GST: {{ Number(product.gst_percent || 0).toFixed(2) }}%</div>
                                 </div>
                                 <div class="text-right">
                                     <div class="font-bold text-emerald-700">₹{{ Number(product.rate_a).toFixed(2) }}</div>
@@ -460,7 +569,21 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
                     <button @click="lookupCustomer" :disabled="lookingUpCustomer" class="px-3 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-sm rounded-md shrink-0 shadow-sm border border-slate-900">
                         {{ lookingUpCustomer ? '...' : 'Find' }}
                     </button>
+                    <button
+                        @click="openCreditCollectionModal"
+                        :disabled="!currentCustomer.id || creditInfoLoading"
+                        class="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold text-sm rounded-md shrink-0 shadow-sm border border-amber-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Collect outstanding customer credit"
+                    >
+                        Collect
+                    </button>
                     <div v-if="currentCustomer.id" class="text-xs font-bold text-emerald-700 truncate max-w-[120px] fixed top-16 right-4 bg-white px-2 py-1 rounded shadow border border-emerald-100 z-50">✓ {{ currentCustomer.name }}</div>
+                    <div
+                        v-if="currentCustomer.id && Number(customerCredit.pending_credit || 0) > 0"
+                        class="fixed top-24 right-4 bg-amber-50 text-amber-800 text-xs px-3 py-1 rounded border border-amber-200 z-50 font-bold shadow"
+                    >
+                        Pending Credit: ₹{{ Number(customerCredit.pending_credit).toFixed(2) }}
+                    </div>
                 </div>
             </div>
         </header>
@@ -509,6 +632,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
                                 </td>
                                 <td class="px-3 py-2">
                                     <input type="number" min="1" v-model="item.qty" @input="updateItem(item)" :disabled="currentMeta.locked" class="w-16 text-center border-emerald-500 rounded text-base font-bold text-emerald-900 bg-emerald-50 py-1 shadow-sm focus:ring-emerald-500 disabled:opacity-50" />
+                                    <div v-if="item.free_qty > 0" class="text-[10px] text-center font-bold text-amber-600 mt-0.5">+{{ item.free_qty }} FREE</div>
                                 </td>
                                 <td class="px-3 py-2">
                                     <input type="number" min="0" step="0.5" v-model="item.discount_percent" @input="updateItem(item)" :disabled="currentMeta.locked" class="w-16 text-center border-gray-300 rounded text-sm py-1 shadow-sm focus:ring-emerald-500 disabled:opacity-50" />
@@ -661,6 +785,101 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
                             </tr>
                         </tbody>
                     </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Credit Collection Modal ──────────────── -->
+        <div v-show="creditModalOpen" class="fixed inset-0 z-[70] overflow-y-auto">
+            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                <div class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm" @click="creditModalOpen = false"></div>
+                <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+                <div class="inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-2xl sm:my-8 sm:align-middle sm:max-w-3xl sm:w-full border-t-8 border-amber-500">
+                    <div class="bg-amber-50 px-6 py-5 border-b border-amber-100 flex items-center justify-between">
+                        <div>
+                            <h3 class="text-2xl font-black text-slate-900 tracking-tight">Collect Customer Credit</h3>
+                            <p class="text-sm text-slate-600 mt-1">{{ currentCustomer.name || 'Customer' }} • Pending: ₹{{ Number(customerCredit.pending_credit || 0).toFixed(2) }}</p>
+                        </div>
+                        <button @click="creditModalOpen = false" class="text-slate-400 hover:text-slate-700"><XMarkIcon class="w-6 h-6" /></button>
+                    </div>
+
+                    <div class="px-6 py-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div>
+                            <h4 class="text-xs font-black text-slate-500 uppercase tracking-widest mb-3">Collection Entry</h4>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-700 mb-1.5">Amount</label>
+                                    <input v-model="creditCollectionForm.amount" type="number" min="0.01" step="0.01" class="w-full border-gray-300 rounded shadow-sm focus:ring-amber-500 font-mono text-lg font-bold" />
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="block text-xs font-bold text-slate-700 mb-1.5">Mode</label>
+                                        <select v-model="creditCollectionForm.payment_mode" class="w-full border-gray-300 rounded shadow-sm focus:ring-amber-500 text-sm">
+                                            <option value="cash">Cash</option>
+                                            <option value="bank">Bank/UPI</option>
+                                            <option value="upi">UPI</option>
+                                            <option value="card">Card</option>
+                                            <option value="cheque">Cheque</option>
+                                            <option value="neft">NEFT</option>
+                                            <option value="rtgs">RTGS</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-bold text-slate-700 mb-1.5">Date</label>
+                                        <input v-model="creditCollectionForm.payment_date" type="date" class="w-full border-gray-300 rounded shadow-sm focus:ring-amber-500 text-sm" />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-700 mb-1.5">Transaction No (optional)</label>
+                                    <input v-model="creditCollectionForm.transaction_no" type="text" class="w-full border-gray-300 rounded shadow-sm focus:ring-amber-500 font-mono text-sm uppercase" placeholder="UPI / UTR / cheque ref" />
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-700 mb-1.5">Narration (optional)</label>
+                                    <textarea v-model="creditCollectionForm.narration" rows="3" class="w-full border-gray-300 rounded shadow-sm focus:ring-amber-500 text-sm" placeholder="Collection notes"></textarea>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h4 class="text-xs font-black text-slate-500 uppercase tracking-widest mb-3">Outstanding Bills (Latest 10)</h4>
+                            <div class="border rounded-lg overflow-hidden">
+                                <table class="w-full text-sm">
+                                    <thead class="bg-slate-100 text-xs uppercase tracking-wider text-slate-500 font-bold">
+                                        <tr>
+                                            <th class="px-3 py-2 text-left">Bill</th>
+                                            <th class="px-3 py-2 text-right">Credit</th>
+                                            <th class="px-3 py-2 text-right">Collected</th>
+                                            <th class="px-3 py-2 text-right">Outstanding</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        <tr v-if="!customerCredit.recent_bills?.length">
+                                            <td colspan="4" class="px-3 py-6 text-center text-slate-400">No bill history found.</td>
+                                        </tr>
+                                        <tr v-for="bill in customerCredit.recent_bills" :key="bill.id">
+                                            <td class="px-3 py-2 text-slate-700 font-mono">{{ bill.bill_no }}</td>
+                                            <td class="px-3 py-2 text-right text-slate-600">₹{{ Number(bill.credit_amount || 0).toFixed(2) }}</td>
+                                            <td class="px-3 py-2 text-right text-emerald-700">₹{{ Number(bill.collected_amount || 0).toFixed(2) }}</td>
+                                            <td class="px-3 py-2 text-right font-bold" :class="Number(bill.outstanding_credit || 0) > 0 ? 'text-amber-700' : 'text-slate-400'">
+                                                ₹{{ Number(bill.outstanding_credit || 0).toFixed(2) }}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-gray-100 px-6 py-4 flex justify-end gap-3 border-t border-gray-200">
+                        <button @click="creditModalOpen = false" class="py-2 px-5 border border-gray-300 rounded font-bold text-gray-600 bg-white hover:bg-gray-50">Cancel</button>
+                        <button
+                            @click="submitCreditCollection"
+                            :disabled="creditSubmitting"
+                            class="py-2 px-6 bg-amber-500 hover:bg-amber-600 text-slate-900 font-black rounded shadow disabled:opacity-50"
+                        >
+                            {{ creditSubmitting ? 'Saving...' : 'Collect Credit' }}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>

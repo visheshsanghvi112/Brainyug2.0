@@ -5,6 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\DistOrder;
 use App\Models\DistOrderItem;
+use App\Models\Product;
+use App\Models\SalesInvoice;
+use App\Models\SalesInvoiceItem;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Cache;
@@ -25,14 +28,14 @@ class OrderController extends Controller
 
         $query = DistOrder::with('items.product:id,product_name');
 
-        if ($user->hasRole('Franchisee') || $user->hasRole('Franchisee Staff')) {
+        if ($user->isFranchisee()) {
             if (!$franchiseeId) {
                 return response()->json(['error' => 'No franchisee profile active.'], 403);
             }
             $query->where('franchisee_id', $franchiseeId);
         }
 
-        $orders = $query->latest('order_date')->paginate($limit);
+        $orders = $query->latest()->paginate($limit);
 
         return response()->json($orders);
     }
@@ -45,7 +48,7 @@ class OrderController extends Controller
         $user = $request->user();
         $order = DistOrder::with('items.product')->findOrFail($id);
 
-        if ($user->hasRole('Franchisee') && $order->franchisee_id !== $user->getEffectiveFranchiseeId()) {
+        if ($user->isFranchisee() && $order->franchisee_id !== $user->getEffectiveFranchiseeId()) {
             return response()->json(['error' => 'Unauthorized access to order.'], 403);
         }
 
@@ -58,7 +61,7 @@ class OrderController extends Controller
      */
     public function store(Request $request)
     {
-        $request->validate([
+        $validated = $request->validate([
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.qty' => 'required|integer|min:1',
@@ -75,43 +78,66 @@ class OrderController extends Controller
         try {
             DB::beginTransaction();
 
+            $productMap = Product::query()
+                ->visibleForFranchise()
+                ->with('hsn:id,cgst_percent,sgst_percent,igst_percent')
+                ->whereIn('id', collect($validated['items'])->pluck('product_id')->unique()->all())
+                ->get(['id', 'hsn_id', 'mrp', 'rate_a', 'ptr', 'pts', 'sgst', 'cgst', 'igst'])
+                ->keyBy('id');
+
+            if ($productMap->count() !== count(collect($validated['items'])->pluck('product_id')->unique())) {
+                return response()->json(['error' => 'One or more products are no longer available for franchise ordering.'], 422);
+            }
+
             $order = DistOrder::create([
-                'order_no' => 'MOB-' . date('Ymd') . '-' . rand(1000, 9999),
+                'order_number' => DistOrder::generateOrderNumber(),
                 'franchisee_id' => $franchiseeId,
-                'created_by' => $user->id,
-                'order_date' => now(),
+                'user_id' => $user->id,
                 'status' => 'pending',
-                'remarks' => $request->remarks,
-                'total_amount' => 0 // Recalculated below
+                'notes' => $validated['remarks'] ?? null,
+                'subtotal' => 0,
+                'total_amount' => 0,
             ]);
 
-            $total = 0;
+            $subtotal = 0.0;
+            $taxTotal = 0.0;
 
-            foreach ($request->items as $item) {
-                // Fetch product for pricing
-                $product = \App\Models\Product::findOrFail($item['product_id']);
-                
-                // Typical FMS uses PTR (Price to Retailer)
-                $rate = $product->ptr;
-                $amount = $rate * $item['qty'];
-                $total += $amount;
+            foreach ($validated['items'] as $item) {
+                $product = $productMap->get($item['product_id']);
+                $rate = $product->franchiseRate();
+                $gstPercent = $product->gstPercent();
+                $taxableAmount = round($rate * $item['qty'], 2);
+                $gstAmount = round($taxableAmount * ($gstPercent / 100), 2);
+                $lineTotal = $taxableAmount + $gstAmount;
+
+                $subtotal += $taxableAmount;
+                $taxTotal += $gstAmount;
 
                 DistOrderItem::create([
                     'dist_order_id' => $order->id,
                     'product_id' => $product->id,
-                    'qty' => $item['qty'],
+                    'request_qty' => $item['qty'],
+                    'mrp' => $product->mrp ?? 0,
                     'rate' => $rate,
-                    'amount' => $amount
+                    'gst_percent' => $gstPercent,
+                    'taxable_amount' => $taxableAmount,
+                    'gst_amount' => $gstAmount,
+                    'total_amount' => $lineTotal,
                 ]);
             }
 
-            $order->update(['total_amount' => $total]);
+            $order->update([
+                'subtotal' => round($subtotal, 2),
+                'sgst_amount' => round($taxTotal / 2, 2),
+                'cgst_amount' => round($taxTotal / 2, 2),
+                'total_amount' => round($subtotal + $taxTotal, 2),
+            ]);
 
             DB::commit();
 
             return response()->json([
                 'message' => 'Order placed successfully.',
-                'order_no' => $order->order_no,
+                'order_number' => $order->order_number,
                 'id' => $order->id
             ], 201);
 
@@ -127,12 +153,12 @@ class OrderController extends Controller
      */
     public function posSale(Request $request, InventoryService $inventoryService, LedgerService $ledgerService)
     {
-        $request->validate([
+        $validated = $request->validate([
             'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required',
-            'items.*.batch_no' => 'required',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.batch_no' => 'required|string|max:50',
             'items.*.qty' => 'required|integer|min:1',
-            'items.*.rate' => 'required|numeric',
+            'items.*.expiry_date' => 'nullable|date',
             'payments' => 'nullable|array', // Structure for cash/bank split
         ]);
 
@@ -146,49 +172,94 @@ class OrderController extends Controller
         try {
             DB::beginTransaction();
 
-            // POS Invoice creation
-            $invoice = \App\Models\SalesInvoice::create([
+            $productMap = Product::query()
+                ->visibleForFranchise()
+                ->with('hsn:id,cgst_percent,sgst_percent,igst_percent')
+                ->whereIn('id', collect($validated['items'])->pluck('product_id')->unique()->all())
+                ->get(['id', 'hsn_id', 'mrp', 'rate_a', 'ptr', 'pts', 'sgst', 'cgst', 'igst'])
+                ->keyBy('id');
+
+            if ($productMap->count() !== count(collect($validated['items'])->pluck('product_id')->unique())) {
+                return response()->json(['error' => 'One or more products are no longer available for franchise sale.'], 422);
+            }
+
+            $invoice = SalesInvoice::create([
                 'bill_no' => 'MOB-' . date('ymd') . rand(1000, 9999), // Example UUID or sequence
                 'franchisee_id' => $franchiseeId,
                 'user_id' => $user->id,
                 'date_time' => now(),
                 'sub_total' => 0,
+                'total_discount_amount' => 0,
+                'total_tax_amount' => 0,
+                'other_charges' => 0,
+                'total_amount' => 0,
                 'status' => 'completed'
             ]);
 
-            $total = 0;
+            $subtotal = 0.0;
+            $taxTotal = 0.0;
 
-            foreach ($request->items as $item) {
-                // Check stock validity directly via Ledger Service
-                $inventoryService->recordSale(
-                    'franchisee',
-                    $franchiseeId,
-                    $item['product_id'],
+            foreach ($validated['items'] as $item) {
+                $product = $productMap->get($item['product_id']);
+                $rate = $product->franchiseRate();
+                $mrp = round((float) ($product->mrp ?? 0), 2);
+                $gstPercent = $product->gstPercent();
+
+                $availableStock = $inventoryService->getStock(
+                    $product->id,
                     $item['batch_no'],
-                    $item['qty'],
-                    $item['rate'], // Example param signature matching our service
-                    $user->id,
-                    "Mobile POS Sale Vol-{$invoice->bill_no}"
+                    'franchisee',
+                    $franchiseeId
                 );
 
-                $amount = $item['qty'] * $item['rate'];
-                $total += $amount;
+                if ($availableStock > 0 && (float) $item['qty'] > $availableStock) {
+                    return response()->json([
+                        'error' => "Insufficient stock for batch {$item['batch_no']}.",
+                    ], 422);
+                }
 
-                \App\Models\SalesInvoiceItem::create([
+                $taxableAmount = round($rate * $item['qty'], 2);
+                $gstAmount = round($taxableAmount * ($gstPercent / 100), 2);
+                $lineTotal = $taxableAmount + $gstAmount;
+
+                $subtotal += $taxableAmount;
+                $taxTotal += $gstAmount;
+
+                SalesInvoiceItem::create([
                     'sales_invoice_id' => $invoice->id,
                     'product_id' => $item['product_id'],
                     'batch_no' => $item['batch_no'],
+                    'expiry_date' => $item['expiry_date'] ?? null,
                     'qty' => $item['qty'],
-                    'rate' => $item['rate'],
-                    'mrp' => 0, // Mocked for speed
-                    'taxable_amount' => $amount,
-                    'gst_percent' => 5, // Mocked
-                    'gst_amount' => $amount * 0.05,
-                    'total_amount' => $amount * 1.05
+                    'free_qty' => 0,
+                    'rate' => $rate,
+                    'mrp' => $mrp,
+                    'discount_percent' => 0,
+                    'discount_amount' => 0,
+                    'taxable_amount' => $taxableAmount,
+                    'gst_percent' => $gstPercent,
+                    'gst_amount' => $gstAmount,
+                    'total_amount' => $lineTotal,
+                ]);
+
+                $inventoryService->recordSale([
+                    'product_id' => $item['product_id'],
+                    'batch_no' => $item['batch_no'],
+                    'expiry_date' => $item['expiry_date'] ?? null,
+                    'mrp' => $mrp,
+                    'franchisee_id' => $franchiseeId,
+                    'qty' => $item['qty'],
+                    'rate' => $rate,
+                    'reference_id' => $invoice->id,
+                    'created_by' => $user->id,
                 ]);
             }
 
-            $invoice->update(['total_amount' => $total * 1.05]);
+            $invoice->update([
+                'sub_total' => round($subtotal, 2),
+                'total_tax_amount' => round($taxTotal, 2),
+                'total_amount' => round($subtotal + $taxTotal, 2),
+            ]);
 
             // Clear the 60-second dashboard cache to force refresh on next pull
             Cache::forget("api.stock.franchisee.{$franchiseeId}");

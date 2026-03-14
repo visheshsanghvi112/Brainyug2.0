@@ -1,6 +1,7 @@
 <script setup>
-import { Head, Link, router } from '@inertiajs/vue3';
+import { Head, router } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
+import Pagination from '@/Components/Pagination.vue';
 import { ref, watch } from 'vue';
 
 const props = defineProps({
@@ -97,16 +98,6 @@ const exportCsv = () => {
             </div><!-- overflow-x-auto -->
         </div>
 
-        <div v-if="stock.total > stock.per_page" class="mt-6 flex justify-center">
-            <!-- Simple Pagination fallback if component not found -->
-            <div class="flex gap-1">
-                <template v-for="(link, index) in (stock.links || []).filter(Boolean)" :key="link.label || `stock-current-link-${index}`">
-                    <Link v-if="link.url" :href="link.url" v-html="link.label"
-                        class="px-3 py-1 border rounded text-sm"
-                        :class="link.active ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'" />
-                    <span v-else v-html="link.label" class="px-3 py-1 border rounded text-sm text-gray-300" />
-                </template>
-            </div>
-        </div>
+        <Pagination :data="stock" class="mt-6" />
     </AuthenticatedLayout>
 </template>

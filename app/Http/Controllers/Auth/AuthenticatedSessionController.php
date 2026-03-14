@@ -34,6 +34,11 @@ class AuthenticatedSessionController extends Controller
 
         $request->session()->regenerate();
 
+        if ($request->user()?->needsPasswordReset()) {
+            return redirect()->route('password.force.edit')
+                ->with('status', 'For security, please reset your password before continuing.');
+        }
+
         return redirect()->intended(route($homeRouteService->routeName($request->user()), absolute: false));
     }
 

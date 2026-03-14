@@ -13,7 +13,7 @@ class StockAdjustmentController extends Controller
 {
     public function index(Request $request)
     {
-        if (!$request->user()->hasRole(['Super Admin', 'Distributor'])) {
+        if (!$request->user()->isAdmin() && !$request->user()->isDistributer()) {
             abort(403);
         }
 
@@ -36,7 +36,7 @@ class StockAdjustmentController extends Controller
 
     public function store(Request $request, InventoryService $inventoryService)
     {
-        if (!$request->user()->hasRole(['Super Admin', 'Distributor'])) {
+        if (!$request->user()->isAdmin() && !$request->user()->isDistributer()) {
             abort(403);
         }
 

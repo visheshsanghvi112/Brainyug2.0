@@ -1,5 +1,6 @@
 <script setup>
-import { Head, Link } from '@inertiajs/vue3';
+import { Head } from '@inertiajs/vue3';
+import Pagination from '@/Components/Pagination.vue';
 import { CurrencyRupeeIcon, TableCellsIcon } from '@heroicons/vue/24/outline';
 
 const props = defineProps({
@@ -71,15 +72,8 @@ const props = defineProps({
                     </table>
                 </div>
                 
-                <!-- Pagination -->
-                <div class="bg-gray-50 px-6 py-3 border-t border-gray-200 flex justify-between items-center" v-if="ledgers.total > 0">
-                    <span class="text-sm text-gray-500">Showing {{ ledgers.from }} to {{ ledgers.to }} of {{ ledgers.total }} entries</span>
-                    <div class="flex gap-2">
-                        <template v-for="(link, index) in (ledgers.links || []).filter(Boolean)" :key="link.label || `ledger-link-${index}`">
-                            <Link v-if="link.url" :href="link.url" v-html="link.label" class="px-3 py-1 text-sm rounded border border-gray-300" :class="link.active ? 'bg-indigo-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'" />
-                            <span v-else v-html="link.label" class="px-3 py-1 text-sm rounded border border-gray-300 text-gray-300" />
-                        </template>
-                    </div>
+                <div class="bg-gray-50 px-6 py-3 border-t border-gray-200">
+                    <Pagination :data="ledgers" />
                 </div>
             </div>
         </div>

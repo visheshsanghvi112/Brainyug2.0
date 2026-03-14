@@ -1,6 +1,7 @@
 <script setup>
-import { Head, router, Link } from '@inertiajs/vue3';
+import { Head, router } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
+import Pagination from '@/Components/Pagination.vue';
 import { ref, watch } from 'vue';
 import { TruckIcon, ArchiveBoxIcon, BuildingStorefrontIcon } from '@heroicons/vue/24/outline';
 
@@ -77,15 +78,6 @@ watch(dayFilter, (val) => {
             </div><!-- overflow-x-auto -->
         </div>
 
-        <div v-if="stock.total > stock.per_page" class="mt-6 flex justify-center">
-            <div class="flex gap-1">
-                <template v-for="(link, index) in (stock.links || []).filter(Boolean)" :key="link.label || `stock-nonmoving-link-${index}`">
-                    <Link v-if="link.url" :href="link.url" v-html="link.label"
-                        class="px-3 py-1 border rounded text-sm transition-all"
-                        :class="link.active ? 'bg-slate-800 text-white' : 'bg-white text-gray-500 hover:bg-gray-100'" />
-                    <span v-else v-html="link.label" class="px-3 py-1 border rounded text-sm text-gray-300" />
-                </template>
-            </div>
-        </div>
+        <Pagination :data="stock" class="mt-6" />
     </AuthenticatedLayout>
 </template>

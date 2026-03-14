@@ -12,11 +12,20 @@ import {
     CalculatorIcon,
     DocumentArrowDownIcon,
     BoltIcon, // for auto-allocate
-    ExclamationTriangleIcon
+    ExclamationTriangleIcon,
+    BanknotesIcon,
+    ClockIcon,
+    ArrowTrendingDownIcon
 } from '@heroicons/vue/24/outline';
 
 const props = defineProps({
     order: Object,
+    orderLock: Object,
+    paymentSummary: Object,
+    canReviewBills: Boolean,
+    canReorderRejectedOrder: Boolean,
+    canSubmitPayment: Boolean,
+    canManagePayments: Boolean,
 });
 
 // Calculate missing defaults & init Form
@@ -51,16 +60,63 @@ const rejectForm = useForm({
     rejection_reason: '',
 });
 
+const paymentForm = useForm({
+    amount: Number(props.paymentSummary?.available_to_submit || 0) || '',
+    payment_mode: 'bank',
+    reference_no: '',
+    payment_date: new Date().toISOString().split('T')[0],
+    narration: '',
+});
+
 const isAccepting = ref(false);
 const isDispatching = ref(false);
 const isRejecting = ref(false);
 const showCalculator = ref(false);
 
+const hasOrderLock = computed(() => Boolean(props.orderLock?.enabled));
+const isOrderLockedByAnother = computed(() => Boolean(props.orderLock?.is_blocked));
+const canUnlockOrder = computed(() => Boolean(props.orderLock?.can_force_unlock || props.orderLock?.is_owner));
+
+const canShowPaymentForm = computed(() => props.canSubmitPayment && Number(props.paymentSummary?.available_to_submit || 0) > 0);
+
+const rowRequiredQty = (item) => Number(item.approved_qty || 0) + Number(item.free_qty || 0);
+const rowNeedsBatch = (item) => rowRequiredQty(item) > 0;
+
+const unlockOrder = () => {
+    router.post(route('admin.dist-orders.unlock', props.order.id), {}, {
+        preserveScroll: true,
+    });
+};
+
+const paymentStatusColors = {
+    pending: 'bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700',
+    confirmed: 'bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-700',
+    rejected: 'bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-700',
+};
+
 const handleAccept = () => {
     isAccepting.value = true;
+    acceptForm.transform((data) => ({
+        items: data.items.map((item) => {
+            const approvedQty = Number(item.approved_qty || 0);
+            const freeQty = Number(item.free_qty || 0);
+            const requiredQty = approvedQty + freeQty;
+
+            return {
+                id: item.id,
+                batch_no: requiredQty > 0 ? (item.batch_no || '') : null,
+                approved_qty: approvedQty,
+                free_qty: freeQty,
+                rate: Number(item.rate || 0),
+                discount_percent: Number(item.discount_percent || 0),
+            };
+        }),
+    }));
+
     acceptForm.post(route('admin.dist-orders.accept', props.order.id), {
         preserveScroll: true,
         onFinish: () => {
+            acceptForm.transform((data) => data);
             isAccepting.value = false;
         }
     });
@@ -86,13 +142,64 @@ const handleReject = () => {
     });
 };
 
+const handleSubmitPayment = () => {
+    paymentForm.post(route('admin.dist-orders.payments.store', props.order.id), {
+        preserveScroll: true,
+        onSuccess: () => {
+            paymentForm.reset('amount', 'reference_no', 'narration');
+            paymentForm.payment_mode = 'bank';
+            paymentForm.payment_date = new Date().toISOString().split('T')[0];
+        },
+    });
+};
+
+const confirmPayment = (paymentId) => {
+    router.post(route('admin.dist-orders.payments.confirm', {
+        dist_order: props.order.id,
+        dist_order_payment: paymentId,
+    }), {}, {
+        preserveScroll: true,
+    });
+};
+
+const rejectPayment = (paymentId) => {
+    const reason = window.prompt('Enter rejection reason for this payment submission.');
+    if (!reason) {
+        return;
+    }
+
+    router.post(route('admin.dist-orders.payments.reject', {
+        dist_order: props.order.id,
+        dist_order_payment: paymentId,
+    }), {
+        rejection_reason: reason,
+    }, {
+        preserveScroll: true,
+    });
+};
+
+const reorderToCart = () => {
+    const confirmed = window.confirm('Move this rejected order back to cart for correction and resubmission?');
+    if (!confirmed) {
+        return;
+    }
+
+    router.post(route('admin.dist-orders.reorder-to-cart', props.order.id), {}, {
+        preserveScroll: true,
+    });
+};
+
 // Auto Allocate Batch (FIFO logic based on available_batches)
 const autoAllocateBatches = () => {
     acceptForm.items.forEach(item => {
         if (!item.batch_no && item.available_batches && item.available_batches.length > 0) {
             // Find a batch that has enough stock
             const reqQty = Number(item.approved_qty) + Number(item.free_qty);
-            const suitableBatch = item.available_batches.find(b => Number(b.stock) >= reqQty) 
+            if (reqQty <= 0) {
+                return;
+            }
+
+            const suitableBatch = item.available_batches.find(b => Number(b.stock) >= reqQty)
                                  || item.available_batches[0]; // fallback to oldest batch
             if (suitableBatch) {
                 item.batch_no = suitableBatch.batch_no;
@@ -161,8 +268,7 @@ const calcInput = (e) => {
             calcExpression.value += e.key;
         } else if (e.key === 'Enter' || e.key === '=') {
             try {
-                // eslint-disable-next-line
-                calcExpression.value = eval(calcExpression.value).toString();
+                calcExpression.value = evaluateCalculatorExpression(calcExpression.value).toString();
             } catch {
                 calcExpression.value = 'ERROR';
             }
@@ -177,8 +283,7 @@ const calcInput = (e) => {
 const pressCalc = (char) => {
     if (char === '=') {
         try {
-            // eslint-disable-next-line
-            calcExpression.value = eval(calcExpression.value).toString();
+            calcExpression.value = evaluateCalculatorExpression(calcExpression.value).toString();
         } catch {
             calcExpression.value = 'ERROR';
         }
@@ -198,6 +303,75 @@ onUnmounted(() => {
     window.removeEventListener('keydown', toggleCalculator);
     window.removeEventListener('keydown', calcInput);
 });
+
+const evaluateCalculatorExpression = (expression) => {
+    const normalized = String(expression || '').replace(/\s+/g, '');
+
+    if (!normalized || !/^[0-9+\-*/.]+$/.test(normalized)) {
+        throw new Error('Invalid expression');
+    }
+
+    const tokens = normalized.match(/\d*\.?\d+|[+\-*/]/g);
+    if (!tokens || tokens.join('') !== normalized) {
+        throw new Error('Invalid expression');
+    }
+
+    const values = [];
+    const operators = [];
+    const precedence = { '+': 1, '-': 1, '*': 2, '/': 2 };
+
+    const applyOperator = () => {
+        const operator = operators.pop();
+        const right = values.pop();
+        const left = values.pop();
+
+        if (operator === undefined || right === undefined || left === undefined) {
+            throw new Error('Invalid expression');
+        }
+
+        switch (operator) {
+            case '+':
+                values.push(left + right);
+                break;
+            case '-':
+                values.push(left - right);
+                break;
+            case '*':
+                values.push(left * right);
+                break;
+            case '/':
+                if (right === 0) {
+                    throw new Error('Division by zero');
+                }
+                values.push(left / right);
+                break;
+            default:
+                throw new Error('Invalid operator');
+        }
+    };
+
+    for (const token of tokens) {
+        if (token in precedence) {
+            while (operators.length && precedence[operators[operators.length - 1]] >= precedence[token]) {
+                applyOperator();
+            }
+            operators.push(token);
+            continue;
+        }
+
+        values.push(Number(token));
+    }
+
+    while (operators.length) {
+        applyOperator();
+    }
+
+    if (values.length !== 1 || !Number.isFinite(values[0])) {
+        throw new Error('Invalid result');
+    }
+
+    return Number(values[0].toFixed(6));
+};
 
 const statusColors = {
     pending: 'bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400 dark:border-yellow-700',
@@ -229,9 +403,12 @@ const statusColors = {
                     <button @click="showCalculator = !showCalculator" class="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-white rounded-lg text-sm font-semibold hover:bg-gray-700 transition shadow-sm border border-gray-700">
                         <CalculatorIcon class="w-4 h-4 text-green-400" /> F12 Calc
                     </button>
-                    <button class="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50 dark:hover:bg-gray-700 transition shadow-sm">
-                        <DocumentArrowDownIcon class="w-4 h-4 text-red-500" /> Print PDF
-                    </button>
+                    <a :href="route('admin.dist-orders.picklist-pdf', order.id)" class="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50 dark:hover:bg-gray-700 transition shadow-sm">
+                        <DocumentArrowDownIcon class="w-4 h-4 text-red-500" /> Picklist PDF
+                    </a>
+                    <a :href="route('admin.dist-orders.gst-invoice-pdf', order.id)" class="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50 dark:hover:bg-gray-700 transition shadow-sm">
+                        <DocumentArrowDownIcon class="w-4 h-4 text-emerald-500" /> GST Invoice PDF
+                    </a>
                     <div class="px-4 py-1.5 rounded-full border text-sm font-bold uppercase tracking-wider" :class="statusColors[order.status]">
                         {{ order.status }}
                     </div>
@@ -250,7 +427,7 @@ const statusColors = {
                             <div class="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1">
                                 <BuildingStorefrontIcon class="w-4 h-4" /> Franchisee Detail
                             </div>
-                            <div class="font-extrabold text-xl text-gray-900 dark:text-gray-100">{{ order.franchisee?.name }}</div>
+                            <div class="font-extrabold text-xl text-gray-900 dark:text-gray-100">{{ order.franchisee?.shop_name }}</div>
                             <div class="text-sm text-indigo-600 dark:text-indigo-400 font-medium tracking-wide">{{ order.franchisee?.shop_code }}</div>
                             <div class="text-xs text-gray-400 mt-2">Ordered by: <span class="text-gray-600 dark:text-gray-300">{{ order.user?.name }}</span></div>
                         </div>
@@ -297,6 +474,172 @@ const statusColors = {
                     </div>
                 </div>
 
+                <div v-if="order.status === 'rejected'" class="rounded-xl border border-rose-200 dark:border-rose-900/40 bg-rose-50 dark:bg-rose-900/20 p-5 flex flex-col lg:flex-row gap-4 justify-between">
+                    <div>
+                        <div class="text-sm font-black uppercase tracking-wide text-rose-700 dark:text-rose-300">Order Rejected</div>
+                        <div class="mt-2 text-sm text-rose-800 dark:text-rose-200">
+                            {{ order.rejection_reason || 'No rejection reason was recorded.' }}
+                        </div>
+                    </div>
+                    <div v-if="props.canReorderRejectedOrder" class="flex items-center">
+                        <button
+                            type="button"
+                            @click="reorderToCart"
+                            class="inline-flex items-center rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white shadow hover:bg-rose-700 transition-colors"
+                        >
+                            Reorder To Cart
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="hasOrderLock" class="rounded-2xl border p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                     :class="isOrderLockedByAnother ? 'border-rose-300 bg-rose-50 dark:border-rose-900/40 dark:bg-rose-900/20' : 'border-emerald-300 bg-emerald-50 dark:border-emerald-900/40 dark:bg-emerald-900/20'">
+                    <div>
+                        <div class="text-sm font-black" :class="isOrderLockedByAnother ? 'text-rose-800 dark:text-rose-300' : 'text-emerald-800 dark:text-emerald-300'">
+                            {{ isOrderLockedByAnother ? 'Order Locked By Another User' : 'Order Lock Active For You' }}
+                        </div>
+                        <div class="text-xs mt-1" :class="isOrderLockedByAnother ? 'text-rose-700 dark:text-rose-400' : 'text-emerald-700 dark:text-emerald-400'">
+                            Owner: {{ orderLock.locked_by_name || 'Unknown' }} · Locked at: {{ formatDate(orderLock.locked_at) }} · Auto-timeout: {{ orderLock.timeout_minutes }} min
+                        </div>
+                    </div>
+                    <button v-if="canUnlockOrder" type="button" @click="unlockOrder"
+                            class="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-black uppercase tracking-wide"
+                            :class="isOrderLockedByAnother ? 'bg-rose-600 text-white hover:bg-rose-700' : 'bg-emerald-600 text-white hover:bg-emerald-700'">
+                        Release / Force Unlock
+                    </button>
+                </div>
+
+                <div v-if="order.status !== 'pending'" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-emerald-200 dark:border-emerald-900/40">
+                    <div class="p-6 bg-gradient-to-r from-emerald-50 to-white dark:from-emerald-900/20 dark:to-gray-800 border-b border-emerald-100 dark:border-gray-700">
+                        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                            <div>
+                                <h3 class="text-lg font-extrabold text-emerald-900 dark:text-emerald-300 border-l-4 border-emerald-500 pl-3">Receivable & Payment Trail</h3>
+                                <p class="text-sm text-emerald-700 dark:text-gray-400 mt-1 pl-4">Legacy parity surface for franchise payment submissions and HO confirmation against this dispatched order.</p>
+                            </div>
+                            <Link :href="route('ledger.index')" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-emerald-200 dark:border-emerald-800 text-sm font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors">
+                                <BanknotesIcon class="w-4 h-4" /> Open Ledger
+                            </Link>
+                        </div>
+                    </div>
+
+                    <div class="p-6 space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 p-5">
+                                <div class="text-xs font-bold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Confirmed</div>
+                                <div class="mt-2 text-3xl font-black text-emerald-600 dark:text-emerald-400">{{ formatCurrency(paymentSummary.confirmed) }}</div>
+                                <div class="mt-1 text-xs text-gray-500">HO-approved receipts posted into ledger</div>
+                            </div>
+                            <div class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 p-5">
+                                <div class="text-xs font-bold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Pending Review</div>
+                                <div class="mt-2 text-3xl font-black text-amber-600 dark:text-amber-400">{{ formatCurrency(paymentSummary.pending) }}</div>
+                                <div class="mt-1 text-xs text-gray-500">Submitted by franchise, waiting on HO confirmation</div>
+                            </div>
+                            <div class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 p-5">
+                                <div class="text-xs font-bold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Outstanding</div>
+                                <div class="mt-2 text-3xl font-black text-rose-600 dark:text-rose-400">{{ formatCurrency(paymentSummary.outstanding) }}</div>
+                                <div class="mt-1 text-xs text-gray-500">Balance still open after confirmed receipts</div>
+                            </div>
+                        </div>
+
+                        <form v-if="canShowPaymentForm" @submit.prevent="handleSubmitPayment" class="rounded-2xl border border-indigo-200 dark:border-indigo-900/40 bg-indigo-50/60 dark:bg-indigo-900/10 p-5">
+                            <div class="flex items-center gap-2 text-indigo-900 dark:text-indigo-300 font-extrabold tracking-tight">
+                                <ArrowTrendingDownIcon class="w-5 h-5" /> Submit Payment Proof
+                            </div>
+                            <div class="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+                                <div>
+                                    <label class="block text-xs font-bold uppercase tracking-wide text-gray-600 dark:text-gray-300">Amount</label>
+                                    <input v-model="paymentForm.amount" type="number" min="0.01" step="0.01" class="mt-1 block w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" required>
+                                    <div class="mt-1 text-[11px] text-gray-500">Available to submit: {{ formatCurrency(paymentSummary.available_to_submit) }}</div>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold uppercase tracking-wide text-gray-600 dark:text-gray-300">Mode</label>
+                                    <select v-model="paymentForm.payment_mode" class="mt-1 block w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                        <option value="cash">Cash</option>
+                                        <option value="bank">Bank Deposit</option>
+                                        <option value="upi">UPI</option>
+                                        <option value="cheque">Cheque</option>
+                                        <option value="neft">NEFT</option>
+                                        <option value="rtgs">RTGS</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold uppercase tracking-wide text-gray-600 dark:text-gray-300">Reference No</label>
+                                    <input v-model="paymentForm.reference_no" type="text" class="mt-1 block w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="UTR / Cheque / Slip">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold uppercase tracking-wide text-gray-600 dark:text-gray-300">Payment Date</label>
+                                    <input v-model="paymentForm.payment_date" type="date" class="mt-1 block w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" required>
+                                </div>
+                                <div class="md:col-span-2 xl:col-span-1">
+                                    <label class="block text-xs font-bold uppercase tracking-wide text-gray-600 dark:text-gray-300">Narration</label>
+                                    <input v-model="paymentForm.narration" type="text" class="mt-1 block w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="Deposit branch / note">
+                                </div>
+                            </div>
+                            <div class="mt-4 flex justify-end">
+                                <button type="submit" :disabled="paymentForm.processing" class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-black text-white shadow-lg hover:bg-indigo-700 transition-colors disabled:opacity-60">
+                                    <BanknotesIcon class="w-4 h-4" /> Submit For Confirmation
+                                </button>
+                            </div>
+                        </form>
+
+                        <div v-else-if="canSubmitPayment && Number(paymentSummary.available_to_submit) <= 0" class="rounded-2xl border border-emerald-200 dark:border-emerald-900/40 bg-emerald-50 dark:bg-emerald-900/10 p-4 text-sm font-medium text-emerald-800 dark:text-emerald-300">
+                            This order has no remaining amount available for new payment submissions.
+                        </div>
+
+                        <div class="overflow-x-auto rounded-2xl border border-gray-200 dark:border-gray-700">
+                            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                                <thead class="bg-gray-50 dark:bg-gray-900/40">
+                                    <tr>
+                                        <th class="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-gray-500">Submitted</th>
+                                        <th class="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-gray-500">Mode / Ref</th>
+                                        <th class="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-gray-500">Notes</th>
+                                        <th class="px-4 py-3 text-right text-xs font-bold uppercase tracking-wider text-gray-500">Amount</th>
+                                        <th class="px-4 py-3 text-center text-xs font-bold uppercase tracking-wider text-gray-500">Status</th>
+                                        <th class="px-4 py-3 text-right text-xs font-bold uppercase tracking-wider text-gray-500">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-100 dark:divide-gray-800 bg-white dark:bg-gray-800">
+                                    <tr v-if="order.payments.length === 0">
+                                        <td colspan="6" class="px-4 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+                                            No payment submissions have been recorded for this order yet.
+                                        </td>
+                                    </tr>
+                                    <tr v-for="payment in order.payments" :key="payment.id" class="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                                        <td class="px-4 py-4 align-top">
+                                            <div class="text-sm font-bold text-gray-900 dark:text-white">{{ payment.created_by?.name || 'Unknown User' }}</div>
+                                            <div class="text-xs text-gray-500 flex items-center gap-1 mt-1"><ClockIcon class="w-3 h-3" /> {{ payment.payment_date }}</div>
+                                        </td>
+                                        <td class="px-4 py-4 align-top">
+                                            <div class="text-sm font-semibold uppercase text-gray-900 dark:text-white">{{ payment.payment_mode }}</div>
+                                            <div class="text-xs font-mono text-indigo-600 dark:text-indigo-300 mt-1">{{ payment.reference_no || 'No reference' }}</div>
+                                        </td>
+                                        <td class="px-4 py-4 align-top text-sm text-gray-600 dark:text-gray-300">
+                                            <div>{{ payment.narration || 'No narration' }}</div>
+                                            <div v-if="payment.status === 'rejected' && payment.rejection_reason" class="mt-2 text-xs font-semibold text-rose-600 dark:text-rose-300">Rejected: {{ payment.rejection_reason }}</div>
+                                        </td>
+                                        <td class="px-4 py-4 align-top text-right text-sm font-black text-gray-900 dark:text-white font-mono">{{ formatCurrency(payment.amount) }}</td>
+                                        <td class="px-4 py-4 align-top text-center">
+                                            <span class="inline-flex rounded-full border px-2.5 py-1 text-xs font-bold uppercase tracking-wide" :class="paymentStatusColors[payment.status]">{{ payment.status }}</span>
+                                            <div v-if="payment.status === 'confirmed' && payment.confirmed_by" class="mt-2 text-[11px] text-gray-500">By {{ payment.confirmed_by.name }}</div>
+                                        </td>
+                                        <td class="px-4 py-4 align-top text-right">
+                                            <div v-if="canManagePayments && payment.status === 'pending'" class="flex items-center justify-end gap-2">
+                                                <button type="button" @click="confirmPayment(payment.id)" class="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 transition-colors">
+                                                    <CheckCircleIcon class="w-4 h-4" /> Confirm
+                                                </button>
+                                                <button type="button" @click="rejectPayment(payment.id)" class="inline-flex items-center gap-1 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-700 transition-colors">
+                                                    <XCircleIcon class="w-4 h-4" /> Reject
+                                                </button>
+                                            </div>
+                                            <div v-else class="text-xs text-gray-400">{{ payment.status === 'pending' ? 'Awaiting HO review' : 'Finalized' }}</div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Step 1: HO Batch Allocation & Live Editor -->
                 <div v-if="order.status === 'pending'" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-indigo-200 dark:border-indigo-900/50">
                     <div class="p-5 bg-gradient-to-r from-indigo-50 to-white dark:from-indigo-900/20 dark:to-gray-800 border-b border-indigo-100 dark:border-gray-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -304,12 +647,17 @@ const statusColors = {
                             <h3 class="text-lg font-extrabold text-indigo-900 dark:text-indigo-300 border-l-4 border-indigo-500 pl-3">Step 1: Batch Allocation & Live Billing</h3>
                             <p class="text-sm text-indigo-700 dark:text-gray-400 mt-1 pl-4">Live-edit quantities, discounts, and PTR. GST calculates dynamically. Select warehouse batches to reserve stock.</p>
                         </div>
-                        <button type="button" @click="autoAllocateBatches" class="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900/50 dark:text-indigo-300 font-bold rounded-lg text-sm transition-colors shadow-sm">
+                        <button v-if="props.canReviewBills" type="button" @click="autoAllocateBatches" class="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900/50 dark:text-indigo-300 font-bold rounded-lg text-sm transition-colors shadow-sm">
                             <BoltIcon class="w-4 h-4" /> Auto-Allocate Batches
                         </button>
                     </div>
+
+                    <div v-if="!props.canReviewBills" class="mx-6 mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
+                        This order is pending review by billing team. You can view line items, but edit/accept actions are restricted.
+                    </div>
                     
                     <form @submit.prevent="handleAccept" class="p-0">
+                        <fieldset :disabled="isOrderLockedByAnother || !props.canReviewBills" class="disabled:opacity-60 disabled:cursor-not-allowed">
                         <div class="overflow-x-auto">
                             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                                 <thead class="bg-gray-50 dark:bg-gray-900/50">
@@ -350,9 +698,9 @@ const statusColors = {
                                             <select 
                                                 v-model="acceptForm.items[index].batch_no" 
                                                 class="block w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm font-bold text-indigo-900 dark:text-indigo-300 shadow-sm"
-                                                required
+                                                :required="rowNeedsBatch(acceptForm.items[index])"
                                             >
-                                                <option value="" disabled>Select Batch</option>
+                                                <option value="">Select Batch</option>
                                                 <option v-for="batch in item.available_batches" :key="batch.batch_no" :value="batch.batch_no">
                                                     {{ batch.batch_no }} ({{ batch.stock }})
                                                 </option>
@@ -378,7 +726,7 @@ const statusColors = {
                                                 v-model="acceptForm.items[index].approved_qty" 
                                                 class="block w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm text-center font-bold text-gray-900 dark:text-white shadow-sm"
                                                 required
-                                                min="0.1" step="0.1"
+                                                min="0" step="0.1"
                                             >
                                         </td>
 
@@ -428,6 +776,7 @@ const statusColors = {
                         <div class="px-6 py-5 bg-gray-50 dark:bg-gray-800/80 border-t border-gray-200 dark:border-gray-700 flex flex-col sm:flex-row items-center justify-between gap-4">
                             <button 
                                 type="button"
+                                v-if="props.canReviewBills"
                                 @click="isRejecting = true"
                                 class="text-sm font-bold text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300 flex items-center gap-1.5 transition-colors"
                             >
@@ -435,6 +784,7 @@ const statusColors = {
                             </button>
 
                             <button 
+                                v-if="props.canReviewBills"
                                 type="submit" 
                                 :disabled="acceptForm.processing"
                                 class="inline-flex justify-center items-center py-3 px-8 border border-transparent shadow-lg text-sm font-black rounded-lg text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transform hover:-translate-y-0.5 transition-all text-shadow"
@@ -443,10 +793,11 @@ const statusColors = {
                                 ACCEPT & LOCK ORDER: {{ formatCurrency(liveTotals.totalAmount) }}
                             </button>
                         </div>
+                        </fieldset>
                     </form>
 
                     <!-- Rejection Panel Hidden by Default -->
-                    <div v-if="isRejecting" class="p-6 bg-red-50 dark:bg-red-900/20 border-t border-red-200 dark:border-red-900/50">
+                    <div v-if="isRejecting && props.canReviewBills" class="p-6 bg-red-50 dark:bg-red-900/20 border-t border-red-200 dark:border-red-900/50">
                         <form @submit.prevent="handleReject">
                             <label class="block text-sm font-bold text-red-800 dark:text-red-400 mb-2">Provide Reason for Rejection (Visible to Franchisee):</label>
                             <textarea 
@@ -464,13 +815,14 @@ const statusColors = {
                 </div>
 
                 <!-- Step 2: Distribution & Tracking (Only when Accepted) -->
-                <div v-if="order.status === 'accepted'" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-green-200 dark:border-green-900/50">
+                <div v-if="order.status === 'accepted' && props.canReviewBills" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-green-200 dark:border-green-900/50">
                     <div class="p-6 bg-gradient-to-r from-green-50 to-white dark:from-green-900/20 dark:to-gray-800 border-b border-green-100 dark:border-gray-700">
                         <h3 class="text-lg font-extrabold text-green-900 dark:text-green-400 border-l-4 border-green-500 pl-3">Step 2: Dispatch Logistics</h3>
                         <p class="text-sm text-green-700 dark:text-gray-400 mt-1 pl-4">The order is billed. Providing tracking info and dispatching will officially transfer inventory from HO to Franchisee Ledger.</p>
                     </div>
                     
                     <form @submit.prevent="handleDispatch" class="p-6">
+                        <fieldset :disabled="isOrderLockedByAnother" class="disabled:opacity-60 disabled:cursor-not-allowed">
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div>
                                 <label class="block text-sm font-bold text-gray-700 dark:text-gray-300">Transporter / Courier Name</label>
@@ -509,6 +861,7 @@ const statusColors = {
                                 CONFIRM DISPATCH & TRANSFER STOCK
                             </button>
                         </div>
+                        </fieldset>
                     </form>
                 </div>
 

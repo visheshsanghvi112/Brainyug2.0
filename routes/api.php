@@ -8,8 +8,8 @@ use App\Http\Controllers\Api\StockController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\OperationalController;
 
-// Mobile API Authentication
-Route::post('/auth/login', [AuthController::class, 'login']);
+// Mobile API Authentication — throttle brute-force attempts (5 attempts/min per IP)
+Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
 
 Route::middleware('auth:sanctum')->group(function () {
     // Current User Profile

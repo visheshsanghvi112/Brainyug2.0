@@ -1,6 +1,7 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
-import { Head, Link } from '@inertiajs/vue3';
+import Pagination from '@/Components/Pagination.vue';
+import { Head } from '@inertiajs/vue3';
 import { ref } from 'vue';
 
 const props = defineProps({
@@ -131,13 +132,6 @@ const statusColors = {
             </div><!-- overflow-x-auto -->
         </div>
 
-        <!-- Pagination -->
-        <div v-if="commissions.last_page > 1" class="flex justify-center gap-1 mt-6">
-            <template v-for="(link, index) in (commissions.links || []).filter(Boolean)" :key="link.label || `commission-link-${index}`">
-                <Link v-if="link.url" :href="link.url"
-                    :class="['px-3 py-1.5 rounded-lg text-sm', link.active ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 ring-1 ring-gray-200 dark:ring-gray-700 hover:bg-gray-50']"
-                    v-html="link.label" />
-            </template>
-        </div>
+        <Pagination :data="commissions" class="mt-6" />
     </AuthenticatedLayout>
 </template>

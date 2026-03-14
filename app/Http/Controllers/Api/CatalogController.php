@@ -22,31 +22,17 @@ class CatalogController extends Controller
         $sync = $request->boolean('sync');
 
         if ($sync) {
+            $catalogVersion = Product::query()->max('updated_at')?->timestamp ?? 0;
+            $cacheKey = "api.catalog.full.{$catalogVersion}";
+
             // Bulk sync scenario (Mobile caching logic)
-            // Cache the ENTIRE active catalog structure for 1 hour
-            $catalog = Cache::remember('api.catalog.full', 3600, function () {
-                return Product::with(['company:id,name', 'category:id,name', 'salt:id,name', 'hsn:id,hsn_code,cgst_percent,sgst_percent', 'boxSize:id,name'])
-                    ->where('is_active', true)
+            // Versioned cache ensures product/rate updates are visible immediately after master updates.
+            $catalog = Cache::remember($cacheKey, 1800, function () {
+                return Product::query()
+                    ->visibleForFranchise()
+                    ->with(['company:id,name', 'category:id,name', 'salt:id,name', 'hsn:id,hsn_code,cgst_percent,sgst_percent,igst_percent', 'boxSize:id,size_name'])
                     ->get()
-                    // Map to a lighter payload to save mobile bandwidth
-                    ->map(function ($p) {
-                        return [
-                            'id' => $p->id,
-                            'name' => $p->product_name,
-                            'sku' => $p->sku,
-                            'barcode' => $p->barcode,
-                            'mrp' => (float)$p->mrp,
-                            'ptr' => (float)$p->ptr, // For B2B pricing
-                            'conversion_factor' => $p->conversion_factor,
-                            'is_loose_sellable' => $p->is_loose_sellable,
-                            'company' => $p->company?->name,
-                            'category' => $p->category?->name,
-                            'tax' => [
-                                'cgst' => (float)($p->hsn?->cgst_percent ?? 0),
-                                'sgst' => (float)($p->hsn?->sgst_percent ?? 0),
-                            ]
-                        ];
-                    });
+                    ->map(fn (Product $product) => $this->serializeProduct($product));
             });
 
             return response()->json([
@@ -59,15 +45,16 @@ class CatalogController extends Controller
         // Standard paginated fetch
         $search = $request->input('search');
 
-        $query = Product::with(['company', 'category', 'hsn'])
-            ->where('is_active', true);
+        $query = Product::query()
+            ->visibleForFranchise()
+            ->with(['company:id,name', 'category:id,name', 'salt:id,name', 'hsn:id,hsn_code,cgst_percent,sgst_percent,igst_percent', 'boxSize:id,size_name']);
 
         if ($search) {
-            $query->where('product_name', 'like', "%{$search}%")
-                  ->orWhere('sku', 'like', "%{$search}%");
+            $query->searchByTerm($search);
         }
 
-        $products = $query->paginate($limit);
+        $products = $query->paginate($limit)
+            ->through(fn (Product $product) => $this->serializeProduct($product));
 
         return response()->json($products);
     }
@@ -78,13 +65,45 @@ class CatalogController extends Controller
     public function categories(Request $request)
     {
         $categories = Cache::rememberForever('api.catalog.categories', function () {
-            return ItemCategory::where('is_active', true)
-                ->select('id', 'name', 'slug')
+            return ItemCategory::query()
+                ->whereNull('deleted_at')
+                ->select('id', 'name')
                 ->get();
         });
 
         return response()->json([
             'data' => $categories
         ]);
+    }
+
+    private function serializeProduct(Product $product): array
+    {
+        $franchiseRate = $product->franchiseRate();
+
+        return [
+            'id' => $product->id,
+            'name' => $product->product_name,
+            'sku' => $product->sku,
+            'barcode' => $product->barcode,
+            'product_code' => $product->product_code,
+            'mrp' => (float) $product->mrp,
+            'ptr' => (float) $product->ptr,
+            'pts' => (float) $product->pts,
+            'rate_a' => (float) $product->rate_a,
+            'franchise_rate' => $franchiseRate,
+            'conversion_factor' => $product->conversion_factor,
+            'is_loose_sellable' => (bool) $product->is_loose_sellable,
+            'company' => $product->company?->name,
+            'category' => $product->category?->name,
+            'salt' => $product->salt?->name,
+            'box_size' => $product->boxSize?->size_name,
+            'tax' => [
+                'cgst' => (float) ($product->hsn?->cgst_percent ?? 0),
+                'sgst' => (float) ($product->hsn?->sgst_percent ?? 0),
+                'igst' => (float) ($product->hsn?->igst_percent ?? 0),
+                'gst_percent' => $product->gstPercent(),
+                'hsn_code' => $product->hsn?->hsn_code,
+            ],
+        ];
     }
 }

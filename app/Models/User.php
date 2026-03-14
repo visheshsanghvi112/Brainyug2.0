@@ -3,6 +3,7 @@
 namespace App\Models;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
+use App\Support\ErpRole;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
@@ -18,6 +19,10 @@ class User extends Authenticatable
         'username',
         'email',
         'phone',
+        'legacy_source',
+        'legacy_user_id',
+        'legacy_type',
+        'legacy_username',
         'password',
         'parent_id',
         'franchisee_id',
@@ -143,32 +148,93 @@ class User extends Authenticatable
 
     public function isSuperAdmin(): bool
     {
-        return $this->hasRole('Super Admin');
+        return $this->hasErpRole('Super Admin');
+    }
+
+    public function isAdmin(): bool
+    {
+        return $this->hasErpRole(['Super Admin', 'Admin']);
     }
 
     public function isStateHead(): bool
     {
-        return $this->hasRole('State Head');
+        return $this->hasErpRole('State Head');
+    }
+
+    public function isRegionalHead(): bool
+    {
+        return $this->hasErpRole('Regional Head');
+    }
+
+    public function isZonalHead(): bool
+    {
+        return $this->hasErpRole('Zonal Head');
     }
 
     public function isZoneHead(): bool
     {
-        return $this->hasRole('Zone Head');
+        return $this->isZonalHead();
     }
 
     public function isDistrictHead(): bool
     {
-        return $this->hasRole('District Head');
+        return $this->hasErpRole('District Head');
     }
 
     public function isFranchisee(): bool
     {
-        return $this->hasRole('Franchisee');
+        return $this->hasErpRole('Franchisee');
+    }
+
+    public function isDistributer(): bool
+    {
+        return $this->hasErpRole('Distributer');
     }
 
     public function isDistributor(): bool
     {
-        return $this->hasRole('Distributor');
+        return $this->isDistributer();
+    }
+
+    public function isAccount(): bool
+    {
+        return $this->hasErpRole('Account');
+    }
+
+    public function isSalesTeam(): bool
+    {
+        return $this->hasErpRole('Sales Team');
+    }
+
+    public function isTerritoryHead(): bool
+    {
+        return $this->hasErpRole(['State Head', 'Regional Head', 'Zonal Head', 'District Head']);
+    }
+
+    public function hasErpRole(array|string $roles): bool
+    {
+        return ErpRole::hasAny($this, $roles);
+    }
+
+    public function canonicalRoleName(): ?string
+    {
+        return ErpRole::primaryRoleFor($this);
+    }
+
+    public function needsPasswordReset(): bool
+    {
+        return (bool) data_get($this->preferences ?? [], 'legacy_migration.must_reset_password', false);
+    }
+
+    public function clearMustResetPasswordFlag(): void
+    {
+        $preferences = $this->preferences ?? [];
+        data_set($preferences, 'legacy_migration.must_reset_password', false);
+        data_set($preferences, 'legacy_migration.password_reset_completed_at', now()->toIso8601String());
+
+        $this->forceFill([
+            'preferences' => $preferences,
+        ])->save();
     }
 
     // ══════════════════════════════════════

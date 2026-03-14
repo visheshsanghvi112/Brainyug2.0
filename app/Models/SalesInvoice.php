@@ -49,4 +49,9 @@ class SalesInvoice extends Model
     {
         return $this->hasMany(SalePayment::class);
     }
+
+    public function creditCollections()
+    {
+        return $this->hasMany(CustomerCreditCollection::class);
+    }
 }

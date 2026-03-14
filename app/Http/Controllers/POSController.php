@@ -10,8 +10,10 @@ use App\Models\Doctor;
 use App\Models\SalesInvoice;
 use App\Models\SalesInvoiceItem;
 use App\Models\SalePayment;
+use App\Models\CustomerCreditCollection;
 use App\Services\InventoryService;
 use App\Services\LedgerService;
+use App\Models\Franchisee;
 use App\Models\InventoryLedger;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -45,18 +47,24 @@ class POSController extends Controller
             return response()->json([]);
         }
 
-        $products = Product::where('is_active', true)
-            ->where('hide', false)
-            ->where(function ($q) use ($term) {
-                $q->where('product_name', 'like', "%{$term}%")
-                  ->orWhere('sku', 'like', "%{$term}%")
-                  ->orWhere('barcode', 'like', "%{$term}%");
-            })
+        $products = Product::visibleForFranchise()
+            ->with('hsn:id,cgst_percent,sgst_percent,igst_percent')
+            ->searchByTerm($term)
             ->select('id', 'product_name', 'sku', 'barcode', 'mrp', 'rate_a', 'csr',
                      'sgst', 'cgst', 'igst', 'conversion_factor', 'packing_desc',
-                     'hsn_id', 'max_discount')
+                     'hsn_id', 'max_discount', 'free_schema', 'product_code', 'fast_search_index', 'ptr', 'pts')
             ->limit(15)
-            ->get();
+            ->get()
+            ->map(function (Product $product) {
+                $product->rate_a = $product->franchiseRate();
+                $product->sgst = (float) (($product->sgst ?? 0) ?: ($product->hsn?->sgst_percent ?? 0));
+                $product->cgst = (float) (($product->cgst ?? 0) ?: ($product->hsn?->cgst_percent ?? 0));
+                $product->igst = (float) (($product->igst ?? 0) ?: ($product->hsn?->igst_percent ?? 0));
+                $product->gst_percent = $product->gstPercent();
+
+                return $product;
+            })
+            ->values();
 
         return response()->json($products);
     }
@@ -70,6 +78,11 @@ class POSController extends Controller
         $request->validate([
             'product_id' => 'required|integer|exists:products,id',
         ]);
+
+        Product::query()
+            ->visibleForFranchise()
+            ->whereKey((int) $request->input('product_id'))
+            ->firstOrFail();
 
         $franchiseeId = $this->resolveFranchiseeId($request->user());
 
@@ -92,6 +105,11 @@ class POSController extends Controller
             'product_id' => 'required|integer|exists:products,id',
             'batch_no'   => 'required|string',
         ]);
+
+        Product::query()
+            ->visibleForFranchise()
+            ->whereKey((int) $request->input('product_id'))
+            ->firstOrFail();
 
         $franchiseeId = $this->resolveFranchiseeId($request->user());
 
@@ -252,22 +270,147 @@ class POSController extends Controller
         $request->validate(['customer_id' => 'required|integer|exists:customers,id']);
         $franchiseeId = $this->resolveFranchiseeId($request->user());
 
-        $pendingCredit = SalePayment::whereHas('invoice', function ($q) use ($request, $franchiseeId) {
-            $q->where('customer_id', $request->input('customer_id'))
-              ->where('franchisee_id', $franchiseeId)
-              ->where('status', 'completed');
-        })->sum('credit_amount');
-
-        $bills = SalesInvoice::where('customer_id', $request->input('customer_id'))
+        $customer = Customer::where('id', $request->integer('customer_id'))
             ->where('franchisee_id', $franchiseeId)
-            ->where('status', 'completed')
-            ->latest()
-            ->limit(10)
-            ->get(['id', 'bill_no', 'date_time', 'total_amount']);
+            ->firstOrFail(['id', 'name', 'mobile']);
+
+        $snapshot = $this->customerCreditSnapshot($customer->id, $franchiseeId, limit: 10);
 
         return response()->json([
-            'pending_credit' => $pendingCredit,
-            'recent_bills'   => $bills,
+            'customer' => $customer,
+            'pending_credit' => $snapshot['pending_credit'],
+            'recent_bills'   => $snapshot['recent_bills'],
+            'recent_collections' => $snapshot['recent_collections'],
+        ]);
+    }
+
+    /**
+     * Collect outstanding customer credit and allocate against oldest open invoices.
+     */
+    public function collectCredit(Request $request, LedgerService $ledgerService)
+    {
+        $validated = $request->validate([
+            'customer_id' => 'required|integer|exists:customers,id',
+            'amount' => 'required|numeric|min:0.01',
+            'payment_mode' => 'required|string|in:cash,bank,upi,card,cheque,neft,rtgs',
+            'payment_date' => 'required|date',
+            'transaction_no' => 'nullable|string|max:100',
+            'wallet_type' => 'nullable|string|max:50',
+            'narration' => 'nullable|string|max:500',
+        ]);
+
+        $user = $request->user();
+        $franchiseeId = $this->resolveFranchiseeId($user);
+
+        $customer = Customer::where('id', $validated['customer_id'])
+            ->where('franchisee_id', $franchiseeId)
+            ->firstOrFail(['id', 'name']);
+
+        $requestedAmount = round((float) $validated['amount'], 2);
+
+        $result = DB::transaction(function () use ($customer, $franchiseeId, $requestedAmount, $validated, $user, $ledgerService) {
+            $openInvoices = SalesInvoice::query()
+                ->where('franchisee_id', $franchiseeId)
+                ->where('customer_id', $customer->id)
+                ->where('status', 'completed')
+                ->orderBy('date_time')
+                ->lockForUpdate()
+                ->get(['id', 'bill_no', 'date_time']);
+
+            $remaining = $requestedAmount;
+            $allocations = [];
+            $firstCollection = null;
+            $totalOutstanding = 0.0;
+
+            foreach ($openInvoices as $invoice) {
+                $raised = (float) SalePayment::query()
+                    ->where('sales_invoice_id', $invoice->id)
+                    ->lockForUpdate()
+                    ->sum('credit_amount');
+
+                if ($raised <= 0) {
+                    continue;
+                }
+
+                $collected = (float) CustomerCreditCollection::query()
+                    ->where('sales_invoice_id', $invoice->id)
+                    ->lockForUpdate()
+                    ->sum('amount');
+
+                $outstanding = round(max(0, $raised - $collected), 2);
+                $totalOutstanding += $outstanding;
+
+                if ($outstanding <= 0 || $remaining <= 0) {
+                    continue;
+                }
+
+                $allocation = round(min($remaining, $outstanding), 2);
+
+                $entry = CustomerCreditCollection::create([
+                    'franchisee_id' => $franchiseeId,
+                    'customer_id' => $customer->id,
+                    'sales_invoice_id' => $invoice->id,
+                    'amount' => $allocation,
+                    'payment_mode' => $validated['payment_mode'],
+                    'transaction_no' => $validated['transaction_no'] ?? null,
+                    'wallet_type' => $validated['wallet_type'] ?? null,
+                    'narration' => $validated['narration'] ?? null,
+                    'collected_at' => $validated['payment_date'],
+                    'created_by' => $user->id,
+                ]);
+
+                if (!$firstCollection) {
+                    $firstCollection = $entry;
+                }
+
+                $allocations[] = [
+                    'invoice_id' => $invoice->id,
+                    'bill_no' => $invoice->bill_no,
+                    'allocated' => $allocation,
+                ];
+
+                $remaining = round($remaining - $allocation, 2);
+            }
+
+            if ($totalOutstanding <= 0) {
+                abort(422, 'This customer has no outstanding credit to collect.');
+            }
+
+            if ($remaining > 0) {
+                abort(422, "Collection exceeds outstanding credit. Available outstanding is {$totalOutstanding}.");
+            }
+
+            $franchisee = Franchisee::query()->findOrFail($franchiseeId);
+
+            $ledgerService->recordEntry(
+                ledgerable: $franchisee,
+                transactionType: 'PAYMENT_RECEIVED',
+                debit: 0,
+                credit: $requestedAmount,
+                reference: $firstCollection,
+                paymentMode: $validated['payment_mode'],
+                narration: $validated['narration']
+                    ? "Credit collection from {$customer->name}: {$validated['narration']}"
+                    : "Credit collection from {$customer->name}",
+                transactionDate: $validated['payment_date'],
+            );
+
+            return [
+                'allocated_total' => $requestedAmount,
+                'allocations' => $allocations,
+            ];
+        });
+
+        $snapshot = $this->customerCreditSnapshot($customer->id, $franchiseeId, limit: 10);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Customer credit collected successfully.',
+            'allocated_total' => $result['allocated_total'],
+            'allocations' => $result['allocations'],
+            'pending_credit' => $snapshot['pending_credit'],
+            'recent_bills' => $snapshot['recent_bills'],
+            'recent_collections' => $snapshot['recent_collections'],
         ]);
     }
 
@@ -297,6 +440,7 @@ class POSController extends Controller
             'items.*.mrp'              => 'required|numeric|min:0',
             'items.*.rate'             => 'required|numeric|min:0',
             'items.*.qty'              => 'required|numeric|min:0.01',
+            'items.*.free_qty'         => 'nullable|numeric|min:0',
             'items.*.discount_percent' => 'required|numeric|min:0|max:100',
             'payment_mode'             => 'required|string|in:cash,bank,credit,cashCredit,bankCredit,cashBank',
             'cash_amount'              => 'required|numeric|min:0',
@@ -324,19 +468,38 @@ class POSController extends Controller
 
             // Load product data in bulk to avoid N+1 (GST + max_discount + conversion_factor)
             $productIds = array_column($validated['items'], 'product_id');
-            $productMap = Product::whereIn('id', $productIds)
-                ->get(['id', 'product_name', 'sgst', 'cgst', 'igst', 'conversion_factor', 'max_discount'])
+            $productMap = Product::query()
+                ->with('hsn:id,cgst_percent,sgst_percent,igst_percent')
+                ->whereIn('id', $productIds)
+                ->visibleForFranchise()
+                ->get(['id', 'product_name', 'product_code', 'mrp', 'rate_a', 'ptr', 'pts', 'sgst', 'cgst', 'igst', 'hsn_id', 'conversion_factor', 'max_discount'])
                 ->keyBy('id');
+
+            if ($productMap->count() !== count(array_unique($productIds))) {
+                abort(422, 'One or more products in this bill are no longer available for franchise sale. Please refresh the cart.');
+            }
 
             // ── Pre-flight checks (better than legacy: legacy had none of these) ──────
 
             foreach ($validated['items'] as $item) {
                 $product = $productMap[$item['product_id']] ?? null;
+                $masterRate = $product?->franchiseRate() ?? 0;
+                $masterMrp = round((float) ($product?->mrp ?? 0), 2);
 
                 // 1. Block expired batches — legacy silently sold them
                 if (!empty($item['expiry_date']) && \Carbon\Carbon::parse($item['expiry_date'])->isPast()) {
                     $name = $product?->product_name ?? "Product #{$item['product_id']}";
                     abort(422, "Batch '{$item['batch_no']}' of {$name} is expired. Remove it from the cart.");
+                }
+
+                if (abs((float) $item['rate'] - $masterRate) > 0.01) {
+                    $name = $product?->product_name ?? "Product #{$item['product_id']}";
+                    abort(422, "Rate changed for {$name}. Latest rate is {$masterRate}. Please refresh and bill again.");
+                }
+
+                if (abs((float) $item['mrp'] - $masterMrp) > 0.01) {
+                    $name = $product?->product_name ?? "Product #{$item['product_id']}";
+                    abort(422, "MRP changed for {$name}. Latest MRP is {$masterMrp}. Please refresh and bill again.");
                 }
 
                 // 2. Enforce max_discount — legacy sometimes skipped this on fast entry
@@ -359,72 +522,103 @@ class POSController extends Controller
 
                 // Allow negative stock if product has no ledger entry yet
                 // (e.g. opening stock entered manually), but warn via logs.
-                if ($availableStock > 0 && (float) $item['qty'] > (float) $availableStock) {
+                $requestedQty = (float) $item['qty'] + (float) ($item['free_qty'] ?? 0);
+                if ($availableStock > 0 && $requestedQty > (float) $availableStock) {
                     $name = $product?->product_name ?? "Product #{$item['product_id']}";
-                    abort(422, "Insufficient stock for {$name} batch '{$item['batch_no']}'. Available: {$availableStock}, Requested: {$item['qty']}.");
+                    abort(422, "Insufficient stock for {$name} batch '{$item['batch_no']}'. Available: {$availableStock}, Requested: {$requestedQty} (incl. free quantity).");
                 }
             }
 
             // ── All checks passed — create the invoice ─────────────────────────────
 
-            $invoice = SalesInvoice::create([
-                'bill_no'               => $validated['bill_no'],
-                'franchisee_id'         => $franchiseeId,
-                'user_id'               => $user->id,
-                'customer_id'           => $customerId,
-                'doctor_id'             => $validated['doctor_id'] ?? null,
-                'date_time'             => now(),
-                'sub_total'             => $validated['sub_total'],
-                'total_discount_amount' => $validated['total_discount_amount'],
-                'total_tax_amount'      => $validated['total_tax_amount'],
-                'other_charges'         => $validated['other_charges'] ?? 0,
-                'total_amount'          => $validated['total_amount'],
-                'status'                => 'completed',
-            ]);
+            $linePayloads = [];
+            $summarySubTotal = 0.0;
+            $summaryDiscount = 0.0;
+            $summaryTax = 0.0;
 
             foreach ($validated['items'] as $item) {
                 $product = $productMap[$item['product_id']] ?? null;
+                $masterRate = $product?->franchiseRate() ?? 0;
+                $masterMrp = round((float) ($product?->mrp ?? 0), 2);
 
-                // Read actual GST from product master — not hardcoded
-                $sgst = (float) ($product->sgst ?? 0);
-                $cgst = (float) ($product->cgst ?? 0);
-                $igst = (float) ($product->igst ?? 0);
-                // POS is always intra-state (same franchisee city) → use SGST+CGST
-                $gstPercent = ($sgst + $cgst) ?: $igst;
+                $gstPercent = $product?->gstPercent() ?? 0;
 
-                $lineBase   = round((float) $item['rate'] * (float) $item['qty'], 4);
+                $lineBase   = round($masterRate * (float) $item['qty'], 4);
                 $discAmt    = round($lineBase * ((float) $item['discount_percent'] / 100), 4);
                 $taxableAmt = $lineBase - $discAmt;
                 $gstAmt     = round($taxableAmt * ($gstPercent / 100), 4);
                 $lineTotal  = $taxableAmt + $gstAmt;
 
+                $summarySubTotal += $lineBase;
+                $summaryDiscount += $discAmt;
+                $summaryTax += $gstAmt;
+
+                $linePayloads[] = [
+                    'product_id' => $item['product_id'],
+                    'batch_no' => $item['batch_no'],
+                    'exp_date' => $item['expiry_date'] ?? null,
+                    'qty' => $item['qty'],
+                    'free_qty' => $item['free_qty'] ?? 0,
+                    'mrp' => $masterMrp,
+                    'rate' => $masterRate,
+                    'discount_percent' => $item['discount_percent'],
+                    'discount_amount' => $discAmt,
+                    'taxable_amount' => $taxableAmt,
+                    'gst_percent' => $gstPercent,
+                    'gst_amount' => $gstAmt,
+                    'total_amount' => $lineTotal,
+                    'inventory_expiry_date' => $item['expiry_date'] ?? null,
+                ];
+            }
+
+            $otherCharges = round((float) ($validated['other_charges'] ?? 0), 2);
+            $grossTotal = round(($summarySubTotal - $summaryDiscount) + $summaryTax + $otherCharges, 2);
+            $invoiceTotal = round($grossTotal, 0);
+
+            $invoice = SalesInvoice::create([
+                'bill_no' => $validated['bill_no'],
+                'franchisee_id' => $franchiseeId,
+                'user_id' => $user->id,
+                'customer_id' => $customerId,
+                'doctor_id' => $validated['doctor_id'] ?? null,
+                'date_time' => now(),
+                'sub_total' => round($summarySubTotal, 2),
+                'total_discount_amount' => round($summaryDiscount, 2),
+                'total_tax_amount' => round($summaryTax, 2),
+                'other_charges' => $otherCharges,
+                'total_amount' => $invoiceTotal,
+                'status' => 'completed',
+            ]);
+
+            foreach ($linePayloads as $linePayload) {
                 SalesInvoiceItem::create([
                     'sales_invoice_id' => $invoice->id,
-                    'product_id'       => $item['product_id'],
-                    'batch_no'         => $item['batch_no'],
-                    'expiry_date'      => $item['expiry_date'] ?? null,
-                    'qty'              => $item['qty'],
-                    'mrp'              => $item['mrp'],
-                    'rate'             => $item['rate'],
-                    'discount_percent' => $item['discount_percent'],
-                    'discount_amount'  => $discAmt,
-                    'taxable_amount'   => $taxableAmt,
-                    'gst_percent'      => $gstPercent,
-                    'gst_amount'       => $gstAmt,
-                    'total_amount'     => $lineTotal,
+                    'product_id' => $linePayload['product_id'],
+                    'batch_no' => $linePayload['batch_no'],
+                    'exp_date' => $linePayload['exp_date'],
+                    'qty' => $linePayload['qty'],
+                    'free_qty' => $linePayload['free_qty'],
+                    'mrp' => $linePayload['mrp'],
+                    'rate' => $linePayload['rate'],
+                    'discount_percent' => $linePayload['discount_percent'],
+                    'discount_amount' => $linePayload['discount_amount'],
+                    'taxable_amount' => $linePayload['taxable_amount'],
+                    'gst_percent' => $linePayload['gst_percent'],
+                    'gst_amount' => $linePayload['gst_amount'],
+                    'total_amount' => $linePayload['total_amount'],
                 ]);
 
                 // Deduct stock via InventoryService (creates audit ledger entry)
                 $inventoryService->recordSale([
-                    'product_id'    => $item['product_id'],
-                    'batch_no'      => $item['batch_no'],
-                    'expiry_date'   => $item['expiry_date'] ?? null,
-                    'mrp'           => $item['mrp'],
+                    'product_id' => $linePayload['product_id'],
+                    'batch_no' => $linePayload['batch_no'],
+                    'expiry_date' => $linePayload['inventory_expiry_date'],
+                    'mrp' => $linePayload['mrp'],
                     'franchisee_id' => $franchiseeId,
-                    'qty'           => $item['qty'],
-                    'rate'          => $item['rate'],
-                    'reference_id'  => $invoice->id,
-                    'created_by'    => $user->id,
+                    'qty' => (float) $linePayload['qty'] + (float) $linePayload['free_qty'],
+                    'rate' => $linePayload['rate'],
+                    'reference_id' => $invoice->id,
+                    'created_by' => $user->id,
                 ]);
             }
 
@@ -445,7 +639,7 @@ class POSController extends Controller
                     ledgerable: \App\Models\Franchisee::find($franchiseeId),
                     transactionType: 'POS_SALE',
                     debit: 0,
-                    credit: $validated['total_amount'],
+                    credit: $invoiceTotal,
                     reference: $invoice,
                     paymentMode: $validated['payment_mode'],
                     narration: "Sale [{$validated['bill_no']}]"
@@ -485,7 +679,10 @@ class POSController extends Controller
                 ->where('franchisee_id', $franchiseeId)
                 ->firstOrFail();
 
-            $totalReturnAmount = 0;
+            $returnedSubTotal = 0.0;
+            $returnedDiscount = 0.0;
+            $returnedTax = 0.0;
+            $returnedTotal = 0.0;
 
             foreach ($validated['items'] as $retItem) {
                 $lineItem = SalesInvoiceItem::where('id', $retItem['sales_invoice_item_id'])
@@ -493,18 +690,47 @@ class POSController extends Controller
                     ->firstOrFail();
 
                 $returnQty = min($retItem['return_qty'], $lineItem->qty);
-                $perUnitTotal = $lineItem->qty > 0 ? $lineItem->total_amount / $lineItem->qty : 0;
-                $returnAmount = round($returnQty * $perUnitTotal, 2);
-                $totalReturnAmount += $returnAmount;
+                if ($returnQty <= 0) {
+                    continue;
+                }
 
-                $lineItem->decrement('qty', $returnQty);
-                $lineItem->decrement('total_amount', $returnAmount);
+                $originalQty = (float) $lineItem->qty;
+                $perUnitBase = $originalQty > 0 ? round(((float) $lineItem->rate * $originalQty) / $originalQty, 4) : 0.0;
+                $perUnitDiscount = $originalQty > 0 ? round((float) $lineItem->discount_amount / $originalQty, 4) : 0.0;
+                $perUnitTaxable = $originalQty > 0 ? round((float) $lineItem->taxable_amount / $originalQty, 4) : 0.0;
+                $perUnitTax = $originalQty > 0 ? round((float) $lineItem->gst_amount / $originalQty, 4) : 0.0;
+                $perUnitTotal = $originalQty > 0 ? round((float) $lineItem->total_amount / $originalQty, 4) : 0.0;
+
+                $lineBaseReturn = round($returnQty * $perUnitBase, 2);
+                $lineDiscountReturn = round($returnQty * $perUnitDiscount, 2);
+                $lineTaxableReturn = round($returnQty * $perUnitTaxable, 2);
+                $lineTaxReturn = round($returnQty * $perUnitTax, 2);
+                $lineTotalReturn = round($returnQty * $perUnitTotal, 2);
+
+                $returnedSubTotal += $lineBaseReturn;
+                $returnedDiscount += $lineDiscountReturn;
+                $returnedTax += $lineTaxReturn;
+                $returnedTotal += $lineTotalReturn;
+
+                $remainingQty = round($originalQty - $returnQty, 2);
+
+                if ($remainingQty <= 0) {
+                    $lineItem->delete();
+                } else {
+                    $lineItem->update([
+                        'qty' => $remainingQty,
+                        'discount_amount' => round(max(0, (float) $lineItem->discount_amount - $lineDiscountReturn), 2),
+                        'taxable_amount' => round(max(0, (float) $lineItem->taxable_amount - $lineTaxableReturn), 2),
+                        'gst_amount' => round(max(0, (float) $lineItem->gst_amount - $lineTaxReturn), 2),
+                        'total_amount' => round(max(0, (float) $lineItem->total_amount - $lineTotalReturn), 2),
+                    ]);
+                }
 
                 // Add stock back
                 $inventoryService->recordSaleReturn([
                     'product_id'    => $lineItem->product_id,
                     'batch_no'      => $lineItem->batch_no,
-                    'expiry_date'   => $lineItem->expiry_date,
+                    'expiry_date'   => $lineItem->exp_date,
                     'mrp'           => $lineItem->mrp,
                     'franchisee_id' => $franchiseeId,
                     'qty'           => $returnQty,
@@ -514,12 +740,21 @@ class POSController extends Controller
                 ]);
             }
 
-            // Reduce invoice total
-            $original->decrement('total_amount', $totalReturnAmount);
+            $newSubTotal = round(max(0, (float) $original->sub_total - $returnedSubTotal), 2);
+            $newDiscount = round(max(0, (float) $original->total_discount_amount - $returnedDiscount), 2);
+            $newTax = round(max(0, (float) $original->total_tax_amount - $returnedTax), 2);
+            $grossTotal = round(($newSubTotal - $newDiscount) + $newTax + (float) $original->other_charges, 2);
+
+            $original->update([
+                'sub_total' => $newSubTotal,
+                'total_discount_amount' => $newDiscount,
+                'total_tax_amount' => $newTax,
+                'total_amount' => round(max(0, $grossTotal), 0),
+            ]);
 
             return response()->json([
                 'success'       => true,
-                'return_amount' => $totalReturnAmount,
+                'return_amount' => round($returnedTotal, 2),
             ]);
         });
     }
@@ -538,5 +773,67 @@ class POSController extends Controller
         $first = \App\Models\Franchisee::first();
         abort_if(!$first, 403, 'No franchisees in system.');
         return (int) $first->id;
+    }
+
+    /**
+     * Build customer credit snapshot using invoice-level outstanding.
+     */
+    private function customerCreditSnapshot(int $customerId, int $franchiseeId, int $limit = 10): array
+    {
+        $invoices = SalesInvoice::query()
+            ->where('customer_id', $customerId)
+            ->where('franchisee_id', $franchiseeId)
+            ->where('status', 'completed')
+            ->latest('date_time')
+            ->limit($limit)
+            ->get(['id', 'bill_no', 'date_time', 'total_amount']);
+
+        $recentBills = [];
+        $pendingCredit = 0.0;
+
+        foreach ($invoices as $invoice) {
+            $creditRaised = (float) SalePayment::query()
+                ->where('sales_invoice_id', $invoice->id)
+                ->sum('credit_amount');
+
+            $collected = (float) CustomerCreditCollection::query()
+                ->where('sales_invoice_id', $invoice->id)
+                ->sum('amount');
+
+            $outstanding = round(max(0, $creditRaised - $collected), 2);
+            $pendingCredit += $outstanding;
+
+            $recentBills[] = [
+                'id' => $invoice->id,
+                'bill_no' => $invoice->bill_no,
+                'date_time' => $invoice->date_time,
+                'total_amount' => (float) $invoice->total_amount,
+                'credit_amount' => $creditRaised,
+                'collected_amount' => $collected,
+                'outstanding_credit' => $outstanding,
+            ];
+        }
+
+        $recentCollections = CustomerCreditCollection::query()
+            ->where('customer_id', $customerId)
+            ->where('franchisee_id', $franchiseeId)
+            ->latest('collected_at')
+            ->latest('id')
+            ->limit(10)
+            ->get([
+                'id',
+                'sales_invoice_id',
+                'amount',
+                'payment_mode',
+                'transaction_no',
+                'collected_at',
+                'narration',
+            ]);
+
+        return [
+            'pending_credit' => round($pendingCredit, 2),
+            'recent_bills' => $recentBills,
+            'recent_collections' => $recentCollections,
+        ];
     }
 }

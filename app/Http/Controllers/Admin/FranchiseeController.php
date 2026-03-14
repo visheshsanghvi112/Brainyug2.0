@@ -14,9 +14,12 @@ use Inertia\Inertia;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use App\Services\GpmCodeService;
 
 class FranchiseeController extends Controller
 {
+    public function __construct(private GpmCodeService $gpmCodeService) {}
+
     /**
      * List all franchisees with filtering and search.
      * Scoped by user role: Admin sees all, State Head sees their state, etc.
@@ -26,6 +29,7 @@ class FranchiseeController extends Controller
         $user = $request->user();
 
         $franchisees = Franchisee::with(['state', 'district', 'city', 'districtHead'])
+            ->withCount('users')
             ->when($request->search, function ($query, $search) {
                 $search = trim($search);
                 $query->where(function ($q) use ($search) {
@@ -45,6 +49,7 @@ class FranchiseeController extends Controller
             ->when($request->district_id, function ($query, $districtId) {
                 $query->where('district_id', $districtId);
             })
+            ->whereIn('status', ['approved', 'active', 'suspended', 'banned'])
             // Role-based scoping
             ->when($user->isStateHead(), function ($query) use ($user) {
                 $stateIds = $user->assignedStateIds();
@@ -62,7 +67,13 @@ class FranchiseeController extends Controller
             'franchisees' => FranchiseeResource::collection($franchisees),
             'filters' => $request->only(['search', 'status', 'state_id', 'district_id']),
             'states' => State::orderBy('name')->get(['id', 'name']),
-            'statusOptions' => ['enquiry', 'registered', 'approved', 'rejected', 'active', 'suspended', 'banned'],
+            'statusOptions' => ['approved', 'active', 'suspended', 'banned'],
+            'pageDescription' => 'This is the live franchise master for BrainYug 2.0. Preserve franchise identities and linked users here while keeping old billing and invoice history out of runtime.',
+            'emptyStateTitle' => 'No live franchisees yet.',
+            'emptyStateBody' => 'Approved franchises will appear here once they become part of the operating network.',
+            'contextMode' => 'network',
+            'indexRoute' => 'admin.franchisees.index',
+            'allowEdit' => true,
         ]);
     }
 
@@ -153,9 +164,13 @@ class FranchiseeController extends Controller
     public function show(Franchisee $franchisee)
     {
         $franchisee->load(['state', 'district', 'city', 'districtHead', 'zoneHead', 'stateHead', 'users', 'approvedBy']);
+        $franchisee->loadCount('users');
 
         return Inertia::render('Network/Franchisees/Profile', [
             'franchisee' => new FranchiseeResource($franchisee),
+            'contextMode' => 'network',
+            'allowEdit' => true,
+            'allowProvision' => true,
         ]);
     }
 
@@ -236,7 +251,7 @@ class FranchiseeController extends Controller
             // Determine shop_code: use provided, or keep existing, or auto-generate GPM
             $shopCode = $request->shop_code
                 ? Str::upper(trim($request->shop_code))
-                : ($franchisee->shop_code ?: $this->generateGpmCode($franchisee));
+                : ($franchisee->shop_code ?: $this->gpmCodeService->nextFor($franchisee));
 
             $franchisee->update([
                 'status' => 'approved',
@@ -259,33 +274,6 @@ class FranchiseeController extends Controller
      * Example: GPMH0070 (Maharashtra #70), GPKA0015 (Karnataka #15)
      * Legacy format preserved exactly for continuity with official documentation.
      */
-    private function generateGpmCode(Franchisee $franchisee): string
-    {
-        $state = $franchisee->state;
-
-        if (!$state || !$state->abbreviation) {
-            // Fallback: use 'XX' if state not set
-            $prefix = 'GPXX';
-        } else {
-            $prefix = 'GP' . $state->abbreviation;
-        }
-
-        // Find the highest existing sequence for this state prefix
-        $lastCode = Franchisee::where('shop_code', 'like', $prefix . '%')
-            ->orderByRaw('CAST(SUBSTRING(shop_code, ' . (strlen($prefix) + 1) . ') AS UNSIGNED) DESC')
-            ->value('shop_code');
-
-        if ($lastCode) {
-            $lastSeq = (int) substr($lastCode, strlen($prefix));
-        } else {
-            $lastSeq = 0;
-        }
-
-        $nextSeq = $lastSeq + 1;
-
-        return $prefix . str_pad((string) $nextSeq, 4, '0', STR_PAD_LEFT);
-    }
-
     public function reject(Request $request, Franchisee $franchisee)
     {
         $request->validate([

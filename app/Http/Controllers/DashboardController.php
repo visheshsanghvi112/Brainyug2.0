@@ -12,6 +12,8 @@ use App\Models\User;
 use App\Models\SalesInvoice;
 use App\Models\FinancialLedger;
 use App\Models\Expense;
+use App\Support\DashboardAccessPolicy;
+use App\Support\DashboardViewProfile;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -29,27 +31,67 @@ class DashboardController extends Controller
 
     private function buildDashboard(User $user): array
     {
-        if ($user->isFranchisee() || $user->hasRole('Franchisee Staff')) {
-            return $this->buildFranchiseeDashboard($user);
+        $profile = DashboardViewProfile::runtimeFor($user);
+
+        $dashboard = match ($profile) {
+            DashboardViewProfile::FRANCHISEE => $this->buildFranchiseeDashboard($user),
+            DashboardViewProfile::DISTRIBUTER => $this->buildDistributerDashboard(),
+            DashboardViewProfile::ACCOUNT => $this->buildAccountDashboard(),
+            DashboardViewProfile::SALES_TEAM => $this->buildSalesTeamDashboard($user),
+            DashboardViewProfile::EXECUTIVE, DashboardViewProfile::ADMIN => $this->buildAdminDashboard($user),
+            default => $this->buildAdminDashboard($user),
+        };
+
+        return $this->applySectionVisibilityOverrides($user, $dashboard);
+    }
+
+    private function applySectionVisibilityOverrides(User $user, array $dashboard): array
+    {
+        $dashboardPreferences = data_get($user->preferences ?? [], 'dashboard', []);
+        if (! is_array($dashboardPreferences) || ! array_key_exists('sections', $dashboardPreferences)) {
+            return $dashboard;
         }
 
-        if ($user->isDistributor()) {
-            return $this->buildDistributorDashboard();
+        $sections = $dashboardPreferences['sections'];
+        if (! is_array($sections)) {
+            $sections = [];
         }
 
-        if ($user->hasRole('Sister Head')) {
-            return $this->buildSisterHeadDashboard($user);
+        $allowed = array_values(array_intersect($sections, DashboardAccessPolicy::allSections()));
+
+        if (! in_array(DashboardAccessPolicy::SECTION_TREND, $allowed, true)) {
+            $dashboard['trend'] = null;
         }
 
-        if ($user->hasRole('Payment Manager')) {
-            return $this->buildPaymentManagerDashboard();
+        if (! in_array(DashboardAccessPolicy::SECTION_PIPELINE, $allowed, true)) {
+            $dashboard['pipeline'] = null;
         }
 
-        if ($user->hasRole('Sales Staff')) {
-            return $this->buildSalesStaffDashboard($user);
+        if (! in_array(DashboardAccessPolicy::SECTION_LEADERBOARD, $allowed, true)) {
+            $dashboard['leaderboard'] = [];
         }
 
-        return $this->buildAdminDashboard($user);
+        if (! in_array(DashboardAccessPolicy::SECTION_ALERTS, $allowed, true)) {
+            $dashboard['alerts'] = [];
+        }
+
+        if (! in_array(DashboardAccessPolicy::SECTION_FOCUS, $allowed, true)) {
+            $dashboard['focus'] = [];
+        }
+
+        if (! in_array(DashboardAccessPolicy::SECTION_ACTIONS, $allowed, true)) {
+            $dashboard['actions'] = [];
+        }
+
+        if (! in_array(DashboardAccessPolicy::SECTION_WORKFLOWS, $allowed, true)) {
+            $dashboard['workflows'] = [];
+        }
+
+        if (! in_array(DashboardAccessPolicy::SECTION_STATS, $allowed, true)) {
+            $dashboard['stats'] = [];
+        }
+
+        return $dashboard;
     }
 
     private function buildAdminDashboard(User $user): array
@@ -57,6 +99,7 @@ class DashboardController extends Controller
         $franchisees = $this->scopedFranchisees($user);
         $orders = $this->scopedOrders($user);
         $scopeLabel = $this->scopeLabel($user);
+        $scopedFranchiseeIds = $user->isSuperAdmin() ? null : (clone $franchisees)->pluck('id')->all();
 
         $approvedInvoiceValue = PurchaseInvoice::query()
             ->approved()
@@ -66,10 +109,28 @@ class DashboardController extends Controller
             )
             ->sum('total_amount');
 
+        $activeFranchisees = (clone $franchisees)->active()->count();
+        $pendingFranchisees = (clone $franchisees)->pending()->count();
+        $openOrders = (clone $orders)->whereIn('status', ['pending', 'accepted'])->count();
+        $riskOrders = (clone $orders)->where('status', 'pending')->where('created_at', '<=', now()->subDays(2))->count();
+
         return [
-            'title' => $user->isSuperAdmin() ? 'Executive Dashboard' : 'Territory Dashboard',
+            'title' => $user->isAdmin() ? ($user->isSuperAdmin() ? 'Executive Dashboard' : 'Admin Dashboard') : 'Territory Dashboard',
             'description' => 'Operational health for ' . $scopeLabel . '.',
-            'role' => $user->getRoleNames()->first() ?? 'User',
+            'role' => $user->canonicalRoleName() ?? 'User',
+            'trend' => $this->salesTrend($scopedFranchiseeIds),
+            'pipeline' => $this->orderPipeline($orders),
+            'leaderboard' => $this->topFranchiseeSales($scopedFranchiseeIds),
+            'alerts' => array_values(array_filter([
+                $pendingFranchisees > 0 ? $this->alert('high', 'Pending franchise approvals', $pendingFranchisees . ' registrations are waiting for decision.', route('admin.franchise-registrations.index')) : null,
+                $riskOrders > 0 ? $this->alert('medium', 'Aging pending orders', $riskOrders . ' orders are pending for more than 48 hours.', route('admin.dist-orders.index', ['status' => 'pending'])) : null,
+                $openOrders > 20 ? $this->alert('medium', 'Dispatch queue saturation', 'Open distribution queue has crossed 20 active orders.', route('admin.dist-orders.index')) : null,
+            ])),
+            'focus' => [
+                ['label' => 'Network Coverage', 'value' => $activeFranchisees . ' active stores in scope'],
+                ['label' => 'Approval SLA', 'value' => ($pendingFranchisees > 0 ? $pendingFranchisees : 'No') . ' items in approval queue'],
+                ['label' => 'Order Throughput', 'value' => $openOrders . ' active orders in process'],
+            ],
             'actions' => [
                 $this->action('Franchise Network', 'Review registrations, approvals, and active stores.', route('admin.franchisees.index'), 'emerald'),
                 $this->action('Distribution Orders', 'Run pending, accepted, and dispatched order operations.', route('admin.dist-orders.index'), 'sky'),
@@ -85,7 +146,7 @@ class DashboardController extends Controller
             'stats' => [
                 [
                     'name' => 'Active Franchisees',
-                    'value' => $this->formatCount((clone $franchisees)->active()->count()),
+                    'value' => $this->formatCount($activeFranchisees),
                     'context' => 'Live stores inside your operating scope.',
                     'icon' => 'UsersIcon',
                     'tone' => 'emerald',
@@ -93,7 +154,7 @@ class DashboardController extends Controller
                 ],
                 [
                     'name' => 'Pending Franchisees',
-                    'value' => $this->formatCount((clone $franchisees)->pending()->count()),
+                    'value' => $this->formatCount($pendingFranchisees),
                     'context' => 'Applications waiting for approval or activation.',
                     'icon' => 'BuildingStorefrontIcon',
                     'tone' => 'amber',
@@ -101,7 +162,7 @@ class DashboardController extends Controller
                 ],
                 [
                     'name' => 'Open Distribution Orders',
-                    'value' => $this->formatCount((clone $orders)->whereIn('status', ['pending', 'accepted'])->count()),
+                    'value' => $this->formatCount($openOrders),
                     'context' => 'Orders awaiting action from HO or dispatch.',
                     'icon' => 'TruckIcon',
                     'tone' => 'sky',
@@ -164,12 +225,28 @@ class DashboardController extends Controller
             ->where('user_id', $user->id)
             ->when($franchiseeId, fn (Builder $query) => $query->orWhere('franchisee_id', $franchiseeId));
 
+        $todaySales = SalesInvoice::where('franchisee_id', $franchiseeId)->whereDate('created_at', now())->sum('total_amount');
+        $pendingOrders = (clone $orders)->where('status', 'pending')->count();
+        $recentRejected = (clone $orders)->where('status', 'rejected')->whereDate('updated_at', '>=', now()->subDays(7))->count();
+
         return [
-            'title' => $user->hasRole('Franchisee Staff') ? 'Franchise Operations Dashboard' : 'Franchisee Dashboard',
+            'title' => 'Franchise Operations Dashboard',
             'description' => $franchiseeId
                 ? 'Your local store operations, order pipeline, and catalog access.'
                 : 'Your account is not linked to a franchisee record yet. Order tools stay limited until that link exists.',
-            'role' => $user->getRoleNames()->first() ?? 'Franchisee',
+            'role' => $user->canonicalRoleName() ?? 'Franchisee',
+            'trend' => $franchiseeId ? $this->salesTrend([$franchiseeId]) : null,
+            'pipeline' => $this->orderPipeline($orders),
+            'leaderboard' => $franchiseeId ? $this->topProductsForFranchise($franchiseeId) : [],
+            'alerts' => array_values(array_filter([
+                $pendingOrders > 0 ? $this->alert('medium', 'Pending HO approval', $pendingOrders . ' order(s) are still waiting with HO.', route('b2b.cart.index')) : null,
+                $recentRejected > 0 ? $this->alert('high', 'Recent rejected orders', $recentRejected . ' orders were rejected in the last 7 days.', route('b2b.cart.index', ['status' => 'rejected'])) : null,
+            ])),
+            'focus' => [
+                ['label' => 'Counter Velocity', 'value' => $this->formatCurrency($todaySales) . ' sold today'],
+                ['label' => 'Cart Readiness', 'value' => (int) ($cart?->items->sum('qty') ?? 0) . ' units ready for reorder'],
+                ['label' => 'Order Reliability', 'value' => $pendingOrders . ' pending with HO'],
+            ],
             'actions' => [
                 $this->action('Order From HO', 'Build the next stock request from the live catalog.', route('b2b.cart.index'), 'sky'),
                 $this->action('Retail POS', 'Generate bills and run day-to-day counter sales.', route('pos.index'), 'emerald'),
@@ -217,7 +294,7 @@ class DashboardController extends Controller
                 ],
                 [
                     'name' => 'Today\'s POS Sales',
-                    'value' => $this->formatCurrency(SalesInvoice::where('franchisee_id', $franchiseeId)->whereDate('created_at', now())->sum('total_amount')),
+                    'value' => $this->formatCurrency($todaySales),
                     'context' => 'Daily retail collection at your counter.',
                     'icon' => 'CurrencyRupeeIcon',
                     'tone' => 'emerald',
@@ -235,14 +312,29 @@ class DashboardController extends Controller
         ];
     }
 
-    private function buildDistributorDashboard(): array
+    private function buildDistributerDashboard(): array
     {
         $orders = DistOrder::query();
+        $pending = (clone $orders)->where('status', 'pending')->count();
+        $accepted = (clone $orders)->where('status', 'accepted')->count();
+        $agedAccepted = (clone $orders)->where('status', 'accepted')->where('accepted_at', '<=', now()->subDays(1))->count();
 
         return [
-            'title' => 'Sales Operations Dashboard',
+            'title' => 'Distributer Order Desk',
             'description' => 'Incoming franchise order desk, approval queue, and dispatch execution.',
-            'role' => 'Distributor',
+            'role' => 'Distributer',
+            'trend' => $this->salesTrend(null),
+            'pipeline' => $this->orderPipeline($orders),
+            'leaderboard' => $this->topFranchiseeSales(null),
+            'alerts' => array_values(array_filter([
+                $pending > 15 ? $this->alert('medium', 'High pending queue', $pending . ' orders are waiting for initial review.', route('admin.dist-orders.index', ['status' => 'pending'])) : null,
+                $agedAccepted > 0 ? $this->alert('high', 'Dispatch delay risk', $agedAccepted . ' accepted order(s) are pending dispatch beyond 24h.', route('admin.dist-orders.index', ['status' => 'accepted'])) : null,
+            ])),
+            'focus' => [
+                ['label' => 'Intake', 'value' => $pending . ' pending approvals'],
+                ['label' => 'Dispatch Queue', 'value' => $accepted . ' ready-to-dispatch orders'],
+                ['label' => 'Backlog Risk', 'value' => $agedAccepted . ' accepted beyond 24h'],
+            ],
             'actions' => [
                 $this->action('Pending Orders', 'Review newly submitted franchise orders.', route('admin.dist-orders.index', ['status' => 'pending']), 'amber'),
                 $this->action('Dispatch Queue', 'Move accepted orders into shipment execution.', route('admin.dist-orders.index', ['status' => 'accepted']), 'sky'),
@@ -291,44 +383,32 @@ class DashboardController extends Controller
         ];
     }
 
-    private function buildSisterHeadDashboard(User $user): array
+    private function buildAccountDashboard(): array
     {
-        return [
-            'title' => 'Sister Head Audit Dashboard',
-            'description' => 'Monitoring and support view for network compliance.',
-            'role' => 'Sister Head',
-            'actions' => [
-                $this->action('Franchise Reviews', 'Inspect network-wide franchise performance and compliance.', route('admin.franchisees.index'), 'indigo'),
-                $this->action('Support Tickets', 'Review operating issues bubbling up from the field.', route('tickets.index'), 'amber'),
-            ],
-            'workflows' => [
-                $this->workflow('Compliance watch', 'Observe active stores, tickets, and network health.', 'live', route('admin.franchisees.index')),
-                $this->workflow('Support escalation', 'Bridge field issues into the central team.', 'active', route('tickets.index')),
-            ],
-            'stats' => [
-                [
-                    'name' => 'Active Franchisees',
-                    'value' => $this->formatCount(Franchisee::active()->count()),
-                    'icon' => 'BuildingStorefrontIcon',
-                    'tone' => 'indigo',
-                    'href' => route('admin.franchisees.index'),
-                ],
-                [
-                    'name' => 'Daily Network Sales',
-                    'value' => $this->formatCurrency(SalesInvoice::whereDate('created_at', now())->sum('total_amount')),
-                    'icon' => 'CurrencyRupeeIcon',
-                    'tone' => 'emerald',
-                ],
-            ],
-        ];
-    }
+        $supplierOutstanding = $this->latestLedgerBalanceTotal((new Supplier())->getMorphClass(), positiveOnly: true);
+        $franchiseeReceivableNet = $this->latestLedgerBalanceTotal((new Franchisee())->getMorphClass());
 
-    private function buildPaymentManagerDashboard(): array
-    {
+        $overdueSupplierInvoices = (int) PurchaseInvoice::query()
+            ->approved()
+            ->whereRaw('DATE_ADD(invoice_date, INTERVAL COALESCE(due_days, 0) DAY) < CURDATE()')
+            ->count();
+
         return [
             'title' => 'Finance & Accounts Dashboard',
             'description' => 'Real-time liquidity and payment reconciliation.',
-            'role' => 'Payment Manager',
+            'role' => 'Account',
+            'trend' => $this->salesTrend(null),
+            'pipeline' => null,
+            'leaderboard' => [],
+            'alerts' => array_values(array_filter([
+                $overdueSupplierInvoices > 0 ? $this->alert('high', 'Supplier dues overdue', $overdueSupplierInvoices . ' supplier invoice(s) are beyond due date.', route('reports.finance.vendor-outstanding')) : null,
+                $supplierOutstanding > 0 ? $this->alert('medium', 'Outstanding supplier exposure', 'Current supplier payable exposure is ' . $this->formatCurrency($supplierOutstanding) . '.', route('reports.finance.vendor-outstanding')) : null,
+            ])),
+            'focus' => [
+                ['label' => 'Receivable Net', 'value' => $this->formatCurrency($franchiseeReceivableNet)],
+                ['label' => 'Supplier Exposure', 'value' => $this->formatCurrency($supplierOutstanding)],
+                ['label' => 'Overdue Vendor Bills', 'value' => $overdueSupplierInvoices . ' invoices'],
+            ],
             'actions' => [
                 $this->action('General Ledger', 'Review receivables, payables, and ledger movements.', route('ledger.index'), 'amber'),
                 $this->action('Expenses', 'Validate network payouts and operating expense entries.', route('expenses.index'), 'rose'),
@@ -340,7 +420,7 @@ class DashboardController extends Controller
             'stats' => [
                 [
                     'name' => 'Total Receivables',
-                    'value' => $this->formatCurrency(FinancialLedger::where('cr_dr', 'Dr')->sum('debit') - FinancialLedger::where('cr_dr', 'Cr')->sum('credit')),
+                    'value' => $this->formatCurrency($franchiseeReceivableNet),
                     'context' => 'Net outstanding from the franchisee network.',
                     'icon' => 'WalletIcon',
                     'tone' => 'amber',
@@ -358,12 +438,47 @@ class DashboardController extends Controller
         ];
     }
 
-    private function buildSalesStaffDashboard(User $user): array
+    private function latestLedgerBalanceTotal(string $ledgerableType, bool $positiveOnly = false): float
     {
+        $latestLedgerSub = DB::table('financial_ledgers')
+            ->selectRaw('ledgerable_id, MAX(id) as max_id')
+            ->where('ledgerable_type', $ledgerableType)
+            ->groupBy('ledgerable_id');
+
+        $query = DB::table('financial_ledgers as fl')
+            ->joinSub($latestLedgerSub, 'latest', function ($join) {
+                $join->on('latest.max_id', '=', 'fl.id');
+            })
+            ->where('fl.ledgerable_type', $ledgerableType);
+
+        if ($positiveOnly) {
+            $query->where('fl.running_balance', '>', 0);
+        }
+
+        return (float) $query->sum('fl.running_balance');
+    }
+
+    private function buildSalesTeamDashboard(User $user): array
+    {
+        $scopedFranchiseeIds = (clone $this->scopedFranchisees($user))->pluck('id')->all();
+
         return [
             'title' => 'Field Sales Dashboard',
             'description' => 'Order pipeline and store performance tracking.',
-            'role' => 'Sales Staff',
+            'role' => 'Sales Team',
+            'trend' => $this->salesTrend($scopedFranchiseeIds),
+            'pipeline' => $this->orderPipeline($this->scopedOrders($user)),
+            'leaderboard' => $this->topFranchiseeSales($scopedFranchiseeIds),
+            'alerts' => array_values(array_filter([
+                DistOrder::where('status', 'pending')->count() > 10
+                    ? $this->alert('medium', 'Pending demand surge', 'Pending orders have crossed double digits. Prioritize callouts.', route('admin.dist-orders.index', ['status' => 'pending']))
+                    : null,
+            ])),
+            'focus' => [
+                ['label' => 'Territory Coverage', 'value' => $this->formatCount(count($scopedFranchiseeIds)) . ' stores mapped'],
+                ['label' => 'Order Momentum', 'value' => $this->formatCount(DistOrder::whereDate('created_at', '>=', now()->subDays(7))->count()) . ' orders in 7d'],
+                ['label' => 'New Growth', 'value' => $this->formatCount(Franchisee::whereDate('created_at', '>=', now()->subDays(30))->count()) . ' stores onboarded in 30d'],
+            ],
             'actions' => [
                 $this->action('Distribution Orders', 'See what stores are demanding right now.', route('admin.dist-orders.index'), 'sky'),
                 $this->action('Franchise Network', 'Track stores, openings, and regional activity.', route('admin.franchisees.index'), 'indigo'),
@@ -404,6 +519,10 @@ class DashboardController extends Controller
             return $query->whereIn('state_id', $user->assignedStateIds());
         }
 
+        if ($user->isRegionalHead()) {
+            return $query->whereIn('district_id', $user->assignedDistrictIds());
+        }
+
         if ($user->isZoneHead()) {
             return $query->where('zone_head_id', $user->id);
         }
@@ -427,6 +546,10 @@ class DashboardController extends Controller
             return $query->whereHas('franchisee', fn (Builder $franchisees) => $franchisees->whereIn('state_id', $user->assignedStateIds()));
         }
 
+        if ($user->isRegionalHead()) {
+            return $query->whereHas('franchisee', fn (Builder $franchisees) => $franchisees->whereIn('district_id', $user->assignedDistrictIds()));
+        }
+
         if ($user->isZoneHead()) {
             return $query->whereHas('franchisee', fn (Builder $franchisees) => $franchisees->where('zone_head_id', $user->id));
         }
@@ -446,6 +569,10 @@ class DashboardController extends Controller
 
         if ($user->isStateHead()) {
             return 'your assigned state territories';
+        }
+
+        if ($user->isRegionalHead()) {
+            return 'your assigned regional districts';
         }
 
         if ($user->isZoneHead()) {
@@ -487,5 +614,124 @@ class DashboardController extends Controller
             'status' => $status,
             'href' => $href,
         ];
+    }
+
+    private function alert(string $severity, string $title, string $message, ?string $href = null): array
+    {
+        return [
+            'severity' => $severity,
+            'title' => $title,
+            'message' => $message,
+            'href' => $href,
+        ];
+    }
+
+    private function salesTrend(?array $franchiseeIds, int $days = 7): array
+    {
+        $start = now()->subDays($days - 1)->startOfDay();
+        $query = SalesInvoice::query()
+            ->where('status', 'completed')
+            ->where('date_time', '>=', $start);
+
+        if (is_array($franchiseeIds)) {
+            if ($franchiseeIds === []) {
+                return ['labels' => [], 'series' => [], 'total' => 0, 'avg' => 0];
+            }
+            $query->whereIn('franchisee_id', $franchiseeIds);
+        }
+
+        $rows = $query
+            ->selectRaw('DATE(date_time) as day, SUM(total_amount) as value')
+            ->groupBy('day')
+            ->orderBy('day')
+            ->get()
+            ->pluck('value', 'day');
+
+        $labels = [];
+        $series = [];
+
+        for ($i = 0; $i < $days; $i++) {
+            $day = now()->subDays($days - 1 - $i);
+            $key = $day->toDateString();
+            $labels[] = $day->format('d M');
+            $series[] = round((float) ($rows[$key] ?? 0), 2);
+        }
+
+        $total = array_sum($series);
+
+        return [
+            'labels' => $labels,
+            'series' => $series,
+            'total' => round($total, 2),
+            'avg' => round($days > 0 ? $total / $days : 0, 2),
+        ];
+    }
+
+    private function orderPipeline(Builder $query): array
+    {
+        $rows = (clone $query)
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status');
+
+        return [
+            'pending' => (int) ($rows['pending'] ?? 0),
+            'accepted' => (int) ($rows['accepted'] ?? 0),
+            'dispatched' => (int) ($rows['dispatched'] ?? 0),
+            'delivered' => (int) ($rows['delivered'] ?? 0),
+            'rejected' => (int) ($rows['rejected'] ?? 0),
+            'cancelled' => (int) ($rows['cancelled'] ?? 0),
+        ];
+    }
+
+    private function topFranchiseeSales(?array $franchiseeIds, int $days = 30, int $limit = 6): array
+    {
+        $query = DB::table('sales_invoices as si')
+            ->join('franchisees as f', 'f.id', '=', 'si.franchisee_id')
+            ->where('si.status', 'completed')
+            ->where('si.date_time', '>=', now()->subDays($days))
+            ->selectRaw('f.id, f.shop_name, f.shop_code, SUM(si.total_amount) as sales, COUNT(si.id) as bills')
+            ->groupBy('f.id', 'f.shop_name', 'f.shop_code')
+            ->orderByDesc('sales')
+            ->limit($limit);
+
+        if (is_array($franchiseeIds)) {
+            if ($franchiseeIds === []) {
+                return [];
+            }
+            $query->whereIn('si.franchisee_id', $franchiseeIds);
+        }
+
+        return $query->get()->map(function ($row) {
+            return [
+                'name' => $row->shop_name,
+                'code' => $row->shop_code,
+                'value' => $this->formatCurrency($row->sales),
+                'meta' => (int) $row->bills . ' bills',
+            ];
+        })->all();
+    }
+
+    private function topProductsForFranchise(int $franchiseeId, int $days = 30, int $limit = 6): array
+    {
+        return DB::table('sales_invoice_items as sii')
+            ->join('sales_invoices as si', 'si.id', '=', 'sii.sales_invoice_id')
+            ->join('products as p', 'p.id', '=', 'sii.product_id')
+            ->where('si.status', 'completed')
+            ->where('si.franchisee_id', $franchiseeId)
+            ->where('si.date_time', '>=', now()->subDays($days))
+            ->selectRaw('p.product_name, p.sku, SUM(sii.qty + COALESCE(sii.free_qty,0)) as units')
+            ->groupBy('p.product_name', 'p.sku')
+            ->orderByDesc('units')
+            ->limit($limit)
+            ->get()
+            ->map(function ($row) {
+                return [
+                    'name' => $row->product_name,
+                    'code' => $row->sku,
+                    'value' => number_format((float) $row->units, 2) . ' units',
+                    'meta' => 'Top mover',
+                ];
+            })->all();
     }
 }

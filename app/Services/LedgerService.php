@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\FinancialLedger;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Carbon;
 
 class LedgerService
 {
@@ -33,11 +34,12 @@ class LedgerService
         float $credit = 0,
         ?Model $reference = null,
         ?string $paymentMode = null,
-        ?string $narration = null
+        ?string $narration = null,
+        string|Carbon|null $transactionDate = null
     ): FinancialLedger {
         return DB::transaction(function () use (
             $ledgerable, $transactionType, $debit, $credit,
-            $reference, $paymentMode, $narration
+            $reference, $paymentMode, $narration, $transactionDate
         ) {
             // Lock the last ledger row for this entity before reading its balance.
             // Without this lock, two concurrent writes read the same balance and
@@ -58,7 +60,9 @@ class LedgerService
             $ledger = new FinancialLedger([
                 'ledgerable_type' => get_class($ledgerable),
                 'ledgerable_id'   => $ledgerable->id,
-                'transaction_date' => now()->toDateString(),
+                'transaction_date' => $transactionDate
+                    ? Carbon::parse($transactionDate)->toDateString()
+                    : now()->toDateString(),
                 'transaction_type' => $transactionType,
                 'voucher_no'      => 'V-' . strtoupper(substr(uniqid(), -8)),
                 'debit'           => $debit,

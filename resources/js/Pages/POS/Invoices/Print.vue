@@ -1,16 +1,68 @@
 <script setup>
 import { Head } from '@inertiajs/vue3'
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 
 const props = defineProps({
     invoice: {
         type: Object,
         required: true,
     },
+    printPreferences: {
+        type: Object,
+        default: () => ({})
+    },
+})
+
+const receiptLayout = computed(() => props.printPreferences?.receipt_layout === 'a4' ? 'a4' : 'thermal')
+const autoPrint = computed(() => props.printPreferences?.auto_print_after_checkout !== false)
+const printerPaperWidth = computed(() => {
+    const width = props.printPreferences?.printer_paper_width
+    return ['58mm', '72mm', '80mm', 'a4'].includes(width) ? width : '80mm'
+})
+const printCopies = computed(() => {
+    const copies = Number(props.printPreferences?.print_copies ?? 1)
+    return Number.isFinite(copies) ? Math.min(Math.max(copies, 1), 5) : 1
+})
+const printerMeta = computed(() => ({
+    printerType: props.printPreferences?.printer_type || 'thermal',
+    printerConnection: props.printPreferences?.printer_connection || 'system_spooler',
+    printerDriver: props.printPreferences?.printer_driver || 'browser_native',
+    printerName: props.printPreferences?.printer_name || '',
+    printerIp: props.printPreferences?.printer_ip || '',
+    printerPort: Number(props.printPreferences?.printer_port ?? 9100),
+    autoCutReceipt: props.printPreferences?.auto_cut_receipt !== false,
+    openCashDrawer: props.printPreferences?.open_cash_drawer === true,
+    eposTimeoutMs: Number(props.printPreferences?.epos_timeout_ms ?? 5000),
+}))
+
+const thermalWidthClass = computed(() => {
+    if (receiptLayout.value === 'a4' || printerPaperWidth.value === 'a4') {
+        return 'paper-a4'
+    }
+
+    if (printerPaperWidth.value === '58mm') {
+        return 'paper-58'
+    }
+
+    if (printerPaperWidth.value === '72mm') {
+        return 'paper-72'
+    }
+
+    return 'paper-80'
 })
 
 onMounted(() => {
-    // Auto-trigger print dialog when component mounts
+    if (!autoPrint.value) {
+        return
+    }
+
+    // Runtime hints for future native print adapters; current flow remains browser print for safety.
+    window.__BRAINYUG_PRINT_PREFS__ = {
+        ...printerMeta.value,
+        printCopies: printCopies.value,
+    }
+
+    // Auto-trigger print dialog when component mounts.
     setTimeout(() => {
         window.print()
     }, 500)
@@ -20,7 +72,7 @@ onMounted(() => {
 <template>
     <Head title="Print Invoice" />
 
-    <div class="print-container">
+    <div class="print-container" :class="[{ 'a4-layout': receiptLayout === 'a4' || printerPaperWidth === 'a4' }, thermalWidthClass]">
         <!-- Thermal Printer Friendly Layout -->
         <div class="text-center mb-4">
             <h1 class="text-xl font-bold">{{ invoice.franchisee?.shop_name || 'BrainYug ERP' }}</h1>
@@ -94,13 +146,28 @@ onMounted(() => {
     }
     .print-container {
         width: 100% !important;
-        max-width: 80mm; /* Standard thermal receipt width */
+        max-width: 80mm;
         margin: 0 auto;
         color: black !important;
         font-family: monospace, sans-serif;
     }
+    .print-container.paper-58 {
+        max-width: 58mm;
+    }
+    .print-container.paper-72 {
+        max-width: 72mm;
+    }
+    .print-container.paper-80 {
+        max-width: 80mm;
+    }
+    .print-container.a4-layout {
+        max-width: 210mm;
+        padding: 12mm;
+        font-family: Arial, sans-serif;
+    }
     @page {
         margin: 0;
+        size: auto;
     }
 }
 
@@ -118,6 +185,20 @@ onMounted(() => {
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
         color: black;
         font-family: monospace, sans-serif;
+    }
+    .print-container.paper-58 {
+        width: 58mm;
+    }
+    .print-container.paper-72 {
+        width: 72mm;
+    }
+    .print-container.paper-80 {
+        width: 80mm;
+    }
+    .print-container.a4-layout {
+        width: min(900px, 95vw);
+        min-height: auto;
+        font-family: Arial, sans-serif;
     }
 }
 </style>

@@ -1,13 +1,21 @@
 <script setup>
-import { ref } from 'vue';
-import { Head, useForm } from '@inertiajs/vue3';
+import { ref, watch } from 'vue';
+import { debounce } from 'lodash';
+import { Head, useForm, router } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import Pagination from '@/Components/Pagination.vue';
-import { PlusIcon, TrashIcon, PencilSquareIcon } from '@heroicons/vue/24/outline';
+import { PlusIcon, TrashIcon, PencilSquareIcon, MagnifyingGlassIcon } from '@heroicons/vue/24/outline';
 
 const props = defineProps({
     hsnCodes: Object,
+    filters: Object,
 });
+
+const search = ref(props.filters?.search ?? '');
+
+watch(search, debounce((val) => {
+    router.get(route('admin.hsn-masters.index'), { search: val }, { preserveState: true, replace: true });
+}, 300));
 
 const isEditing = ref(false);
 const showForm = ref(false);
@@ -119,6 +127,13 @@ const deleteHsn = (id) => {
 
             <!-- Table -->
             <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
+                <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
+                    <div class="relative flex-1 max-w-sm">
+                        <MagnifyingGlassIcon class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                        <input type="text" v-model="search" placeholder="Search by HSN code or name..." class="w-full pl-9 pr-4 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20" />
+                    </div>
+                    <span class="text-xs text-gray-400 whitespace-nowrap">{{ hsnCodes.total?.toLocaleString() }} records</span>
+                </div>
                 <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                     <thead class="bg-gray-50 dark:bg-gray-900/40">

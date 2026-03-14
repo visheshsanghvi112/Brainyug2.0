@@ -60,7 +60,8 @@ const props = defineProps({
                     </tr>
                 </tbody>
             </table>
-            <Pagination :data="returns" />
+            </div>
+            <Pagination :data="returns" class="mt-4" />
         </div>
     </AuthenticatedLayout>
 </template>

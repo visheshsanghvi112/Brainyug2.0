@@ -1,7 +1,7 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import { Head, useForm, Link } from '@inertiajs/vue3';
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import axios from 'axios';
 import { 
     ArrowLeftIcon, 
@@ -21,10 +21,17 @@ const props = defineProps({
 const isEdit = !!props.product?.id;
 
 const currentStep = ref(1);
+const imageSlots = [
+    { key: 'front', label: 'Front View' },
+    { key: 'back', label: 'Back View' },
+    { key: 'left', label: 'Left View' },
+    { key: 'right', label: 'Right View' },
+];
 
 // AJAX state
 const nameWarning      = ref(null);   // duplicate name message or null
 const rackAreas        = ref([]);     // options for rack_area_id, loaded per section
+const localImagePreviews = ref({});
 let   nameCheckTimer   = null;        // debounce handle
 
 const steps = [
@@ -49,7 +56,7 @@ const form = useForm({
     item_type: props.product?.item_type || '',
     color_item_type: props.product?.color_item_type || '',
     company_code: props.product?.company_code || '',
-    product_type: props.product?.product_type || '',
+    product_type: props.product?.product_type || 'Normal',
     is_active: props.product ? !!props.product.is_active : true,
     
     // Step 2: Pricing
@@ -97,6 +104,35 @@ const form = useForm({
     fast_search_index: props.product?.fast_search_index || '',
     hide: props.product ? !!props.product.hide : false,
     is_banned: props.product ? !!props.product.is_banned : false,
+    image_front: null,
+    image_back: null,
+    image_left: null,
+    image_right: null,
+});
+
+const existingImages = computed(() => {
+    const images = Array.isArray(props.product?.images) ? props.product.images : [];
+
+    return images.reduce((carry, image) => {
+        if (image?.position) {
+            carry[image.position] = image;
+        }
+
+        return carry;
+    }, {});
+});
+
+const imagePreviewCards = computed(() => imageSlots.map((slot) => ({
+    ...slot,
+    formKey: `image_${slot.key}`,
+    previewUrl: localImagePreviews.value[slot.key] ?? existingImages.value[slot.key]?.url ?? null,
+    existingPath: existingImages.value[slot.key]?.path ?? null,
+})));
+
+const productCodeHint = computed(() => {
+    return form.product_code?.trim()
+        ? 'This code will be preserved as the internal catalog reference.'
+        : 'Leave blank to auto-generate the next structured product code on save.';
 });
 
 function nextStep() {
@@ -115,11 +151,37 @@ function prevStep() {
 
 function submit() {
     if (isEdit) {
-        form.put(route('admin.products.update', props.product.id));
+        form
+            .transform((data) => ({ ...data, _method: 'put' }))
+            .post(route('admin.products.update', props.product.id), {
+                forceFormData: true,
+                onFinish: () => form.transform((data) => data),
+            });
     } else {
-        form.post(route('admin.products.store'));
+        form.post(route('admin.products.store'), { forceFormData: true });
     }
 }
+
+function onImageSelected(position, event) {
+    const file = event.target.files?.[0] ?? null;
+    const formKey = `image_${position}`;
+
+    form[formKey] = file;
+    form.clearErrors(formKey);
+
+    if (localImagePreviews.value[position]) {
+        URL.revokeObjectURL(localImagePreviews.value[position]);
+        delete localImagePreviews.value[position];
+    }
+
+    if (file) {
+        localImagePreviews.value[position] = URL.createObjectURL(file);
+    }
+}
+
+onBeforeUnmount(() => {
+    Object.values(localImagePreviews.value).forEach((url) => URL.revokeObjectURL(url));
+});
 
 // ----- AJAX: HSN → auto-fill SGST / CGST / IGST -----
 watch(() => form.hsn_id, (hsnId) => {
@@ -287,10 +349,21 @@ if (isEdit && props.product?.rack_section_id) {
                                     <div>
                                         <label class="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">Product Code</label>
                                         <input v-model="form.product_code" type="text" class="w-full rounded-xl border-gray-300 p-3 font-mono focus:ring-4 focus:ring-indigo-500/20 dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                                        <p class="text-xs mt-1 text-indigo-600 dark:text-indigo-300 font-semibold">{{ productCodeHint }}</p>
+                                        <p v-if="form.errors.product_code" class="text-red-500 text-xs mt-1 font-bold">{{ form.errors.product_code }}</p>
                                     </div>
                                     <div>
                                         <label class="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">Legacy Company Code</label>
                                         <input v-model="form.company_code" type="text" class="w-full rounded-xl border-gray-300 p-3 focus:ring-4 focus:ring-indigo-500/20 dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                                    </div>
+
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">Product Type</label>
+                                        <select v-model="form.product_type" class="w-full rounded-xl border-gray-300 p-3 focus:ring-4 focus:ring-indigo-500/20 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                                            <option value="Normal">Normal</option>
+                                            <option value="Prohibited">Prohibited</option>
+                                        </select>
+                                        <p v-if="form.errors.product_type" class="text-red-500 text-xs mt-1 font-bold">{{ form.errors.product_type }}</p>
                                     </div>
 
                                     <div>
@@ -531,8 +604,9 @@ if (isEdit && props.product?.rack_section_id) {
                                                 <label class="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">Rack Section</label>
                                                 <select v-model="form.rack_section_id" class="w-full rounded-xl border-gray-300 p-3 focus:ring-4 focus:ring-indigo-500/20 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
                                                     <option value="">None</option>
-                                                    <option v-for="s in rack_sections" :key="s.id" :value="s.id">{{ s.section_name }}</option>
+                                                    <option v-for="s in rack_sections" :key="s.id" :value="s.id">{{ s.name }}</option>
                                                 </select>
+                                                <p v-if="form.errors.rack_section_id" class="text-red-500 text-xs mt-1 font-bold">{{ form.errors.rack_section_id }}</p>
                                             </div>
                                             <div>
                                                 <label class="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">Rack Area Zone</label>
@@ -541,6 +615,7 @@ if (isEdit && props.product?.rack_section_id) {
                                                     <option v-for="a in rackAreas" :key="a.id" :value="a.id">{{ a.name }}</option>
                                                 </select>
                                                 <p v-if="form.rack_section_id && rackAreas.length === 0" class="text-xs text-gray-400 mt-1">No areas for this section yet.</p>
+                                                <p v-if="form.errors.rack_area_id" class="text-red-500 text-xs mt-1 font-bold">{{ form.errors.rack_area_id }}</p>
                                             </div>
                                         </div>
                                     </div>
@@ -558,6 +633,34 @@ if (isEdit && props.product?.rack_section_id) {
                                             <input v-model="form.is_banned" type="checkbox" class="h-5 w-5 rounded border-gray-300 text-red-600" />
                                             <span class="text-sm font-bold text-red-600 dark:text-red-400">Mark Banned (Global)</span>
                                         </label>
+                                    </div>
+                                </div>
+
+                                <div class="mt-8 border-t border-gray-200 dark:border-gray-700 pt-6">
+                                    <div class="flex items-start justify-between gap-4 mb-5">
+                                        <div>
+                                            <h4 class="text-base font-black uppercase tracking-widest text-gray-400">Merchandising Images</h4>
+                                            <p class="text-sm text-gray-500 mt-1">Legacy had product imagery discipline but weak handling. This version keeps four canonical slots with preview-before-save support.</p>
+                                        </div>
+                                        <div class="text-xs font-semibold text-gray-500 dark:text-gray-400">Max 5 MB per image</div>
+                                    </div>
+
+                                    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
+                                        <div v-for="slot in imagePreviewCards" :key="slot.key" class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/80 p-4 shadow-sm">
+                                            <div class="aspect-[4/3] rounded-xl border border-dashed border-gray-300 dark:border-gray-600 overflow-hidden bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+                                                <img v-if="slot.previewUrl" :src="slot.previewUrl" :alt="slot.label" class="h-full w-full object-cover" />
+                                                <div v-else class="text-center px-4">
+                                                    <p class="text-sm font-bold text-gray-500 dark:text-gray-300">{{ slot.label }}</p>
+                                                    <p class="text-xs text-gray-400 mt-1">Upload pack-facing imagery</p>
+                                                </div>
+                                            </div>
+                                            <div class="mt-4">
+                                                <label class="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2">{{ slot.label }}</label>
+                                                <input type="file" accept="image/*" @change="onImageSelected(slot.key, $event)" class="block w-full text-sm text-gray-600 dark:text-gray-300 file:mr-3 file:rounded-xl file:border-0 file:bg-indigo-50 file:px-4 file:py-2 file:font-semibold file:text-indigo-700 hover:file:bg-indigo-100 dark:file:bg-indigo-900/40 dark:file:text-indigo-200" />
+                                                <p v-if="form.errors[slot.formKey]" class="text-red-500 text-xs mt-2 font-bold">{{ form.errors[slot.formKey] }}</p>
+                                                <p v-else-if="slot.existingPath" class="text-xs mt-2 text-gray-400 break-all">Stored: {{ slot.existingPath }}</p>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>

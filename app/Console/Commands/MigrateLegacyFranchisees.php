@@ -2,18 +2,31 @@
 
 namespace App\Console\Commands;
 
-use Illuminate\Console\Command;
 use App\Helpers\LegacySqlReader;
+use App\Models\User;
+use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 
 class MigrateLegacyFranchisees extends Command
 {
+    private const FRANCHISE_SOURCE = 'genericp_franchisee';
+    private const HO_USER_SOURCE = 'legacy_ho_users';
+    private const FRAN_USER_SOURCE = 'legacy_franchise_users';
+
     protected $signature = 'erp:migrate-legacy-franchisees
         {--ho-file= : Path to pharmaer_pharmaerp.sql (HO database)}
         {--fran-file= : Path to genericp_franchisee.sql (Franchisee database)}
-        {--fresh : Wipe existing districts and franchisees before migrating}';
+        {--fresh : Wipe existing districts and franchisees before migrating}
+        {--fresh-users : Wipe previously imported legacy users, franchise staff links, and territory assignments before importing users}
+        {--users-only : Skip district/franchisee migration and only import legacy users/staff}';
 
-    protected $description = 'Migrate legacy districts + franchisees + user accounts from legacy SQL dumps.';
+    protected $description = 'Migrate legacy districts, franchisees, hierarchy users, and franchisee staff from legacy SQL dumps.';
+
+    private array $importedUserIdMap = [];
+    private array $roleExistsCache = [];
+    private array $franchiseeCodeCache = [];
 
     public function handle()
     {
@@ -33,13 +46,17 @@ class MigrateLegacyFranchisees extends Command
 
         DB::beginTransaction();
         try {
-            $this->migrateDistricts($hoFile);
-            $this->migrateFranchisees($franFile);
+            if (!$this->option('users-only')) {
+                $this->migrateDistricts($hoFile);
+                $this->migrateFranchisees($franFile);
+            }
+
+            $this->migrateUsers($hoFile, $franFile);
             DB::commit();
-            $this->info("Franchisee migration completed successfully.");
+            $this->info('Franchisee and user migration completed successfully.');
         } catch (\Exception $e) {
             DB::rollBack();
-            $this->error("Migration failed: " . $e->getMessage());
+            $this->error('Migration failed: ' . $e->getMessage());
             $this->error($e->getFile() . ':' . $e->getLine());
             return Command::FAILURE;
         }
@@ -132,6 +149,12 @@ class MigrateLegacyFranchisees extends Command
             $seenIds[$franchId] = true;
 
             if (isset($existingIds[$franchId])) {
+                DB::table('franchisees')
+                    ->where('id', $franchId)
+                    ->update([
+                        'legacy_source' => self::FRANCHISE_SOURCE,
+                        'legacy_franchise_id' => $franchId,
+                    ]);
                 $skipped++;
                 continue;
             }
@@ -195,6 +218,8 @@ class MigrateLegacyFranchisees extends Command
                 'pincode'           => substr(trim($row['franch_pincode'] ?? ''), 0, 10) ?: null,
                 'latitude'          => $lat,
                 'longitude'         => $lng,
+                'legacy_source'     => self::FRANCHISE_SOURCE,
+                'legacy_franchise_id' => $franchId,
                 'residence_address' => trim($row['franch_res_address'] ?? '') ?: null,
                 'residence_from'    => trim($row['franch_residence_from'] ?? '') ?: null,
                 'distance_from_shop' => trim($row['franch_distance'] ?? '') ?: null,
@@ -247,6 +272,725 @@ class MigrateLegacyFranchisees extends Command
                 ['With GPM shop_code', $withCode],
             ]
         );
+    }
+
+    private function migrateUsers(string $hoFile, string $franFile): void
+    {
+        $this->info('Migrating legacy users → users...');
+
+        if ($this->option('fresh-users')) {
+            $this->wipeImportedLegacyUsers();
+        }
+
+        $this->importedUserIdMap = $this->loadImportedUserMap();
+
+        $hoUsers = $this->collectLegacyUsers($hoFile, self::HO_USER_SOURCE);
+        $staffContext = $this->collectFranchiseStaffContext($franFile);
+        $franchiseUsers = $this->collectLegacyUsers($franFile, self::FRAN_USER_SOURCE);
+
+        $importedFromHo = $this->upsertLegacyUsers($hoUsers, true);
+
+        $importedFromFranchise = $this->upsertLegacyUsers($franchiseUsers, true);
+
+        $this->hydrateParentLinks($importedFromHo + $importedFromFranchise);
+        $this->syncRolesAndTerritories($importedFromHo + $importedFromFranchise);
+        $this->rebuildHierarchyFromLegacyTables($franFile);
+        $this->migrateFranchiseeStaff($staffContext['rows'], $franchiseUsers);
+    }
+
+    private function rebuildHierarchyFromLegacyTables(string $franFile): void
+    {
+        $this->info('Rebuilding hierarchy/territories from tbl_state_head, tbl_master_head, tbl_district_head...');
+
+        $masterByDistrict = [];
+        $updatedParents = 0;
+        $updatedTerritories = 0;
+
+        foreach (LegacySqlReader::streamTableRows($franFile, 'tbl_state_head') as $row) {
+            $legacyUserId = (int) ($row['stateh_user_id'] ?? 0);
+            $stateCode = (int) ($row['stateh_statecode'] ?? 0);
+            $newUserId = $this->resolveImportedUserId(self::FRAN_USER_SOURCE, $legacyUserId)
+                ?: $this->resolveImportedUserId(self::HO_USER_SOURCE, $legacyUserId);
+
+            if (!$newUserId || $stateCode <= 0 || !DB::table('states')->where('id', $stateCode)->exists()) {
+                continue;
+            }
+
+            DB::table('territory_assignments')->where('user_id', $newUserId)->where('territory_type', 'state')->delete();
+            DB::table('territory_assignments')->updateOrInsert(
+                [
+                    'user_id' => $newUserId,
+                    'territory_type' => 'state',
+                    'territory_id' => $stateCode,
+                ],
+                [
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]
+            );
+            $updatedTerritories++;
+        }
+
+        foreach (LegacySqlReader::streamTableRows($franFile, 'tbl_master_head') as $row) {
+            $legacyUserId = (int) ($row['masterh_user_id'] ?? 0);
+            $legacyParentId = (int) ($row['masterh_statehead_id'] ?? 0);
+            $districtIds = $this->parseDistrictIds((string) ($row['masterh_districtcode'] ?? ''));
+
+            $newUserId = $this->resolveImportedUserId(self::FRAN_USER_SOURCE, $legacyUserId)
+                ?: $this->resolveImportedUserId(self::HO_USER_SOURCE, $legacyUserId);
+
+            if (!$newUserId) {
+                continue;
+            }
+
+            $parentId = $this->resolveImportedUserId(self::FRAN_USER_SOURCE, $legacyParentId)
+                ?: $this->resolveImportedUserId(self::HO_USER_SOURCE, $legacyParentId)
+                ?: $this->resolveImportedUserIdAcrossSources($legacyParentId);
+
+            if ($parentId && $parentId !== $newUserId) {
+                DB::table('users')->where('id', $newUserId)->update(['parent_id' => $parentId]);
+                $updatedParents++;
+            }
+
+            DB::table('territory_assignments')->where('user_id', $newUserId)->where('territory_type', 'district')->delete();
+            foreach ($districtIds as $districtId) {
+                if (!DB::table('districts')->where('id', $districtId)->exists()) {
+                    continue;
+                }
+
+                DB::table('territory_assignments')->updateOrInsert(
+                    [
+                        'user_id' => $newUserId,
+                        'territory_type' => 'district',
+                        'territory_id' => $districtId,
+                    ],
+                    [
+                        'updated_at' => now(),
+                        'created_at' => now(),
+                    ]
+                );
+
+                $masterByDistrict[$districtId] = $legacyUserId;
+                $updatedTerritories++;
+            }
+        }
+
+        foreach (LegacySqlReader::streamTableRows($franFile, 'tbl_district_head') as $row) {
+            $legacyUserId = (int) ($row['districth_user_id'] ?? 0);
+            $districtCode = (int) ($row['districth_districtcode'] ?? 0);
+            $legacyRegionalId = (int) ($row['district_regionalh_id'] ?? 0);
+
+            $newUserId = $this->resolveImportedUserId(self::FRAN_USER_SOURCE, $legacyUserId)
+                ?: $this->resolveImportedUserId(self::HO_USER_SOURCE, $legacyUserId);
+
+            if (!$newUserId) {
+                continue;
+            }
+
+            $effectiveParentLegacyId = $legacyRegionalId > 0
+                ? $legacyRegionalId
+                : ($masterByDistrict[$districtCode] ?? 0);
+
+            $parentId = $this->resolveImportedUserId(self::FRAN_USER_SOURCE, (int) $effectiveParentLegacyId)
+                ?: $this->resolveImportedUserId(self::HO_USER_SOURCE, (int) $effectiveParentLegacyId)
+                ?: $this->resolveImportedUserIdAcrossSources((int) $effectiveParentLegacyId);
+
+            if ($parentId && $parentId !== $newUserId) {
+                DB::table('users')->where('id', $newUserId)->update(['parent_id' => $parentId]);
+                $updatedParents++;
+            }
+
+            DB::table('territory_assignments')->where('user_id', $newUserId)->where('territory_type', 'district')->delete();
+            if ($districtCode > 0 && DB::table('districts')->where('id', $districtCode)->exists()) {
+                DB::table('territory_assignments')->updateOrInsert(
+                    [
+                        'user_id' => $newUserId,
+                        'territory_type' => 'district',
+                        'territory_id' => $districtCode,
+                    ],
+                    [
+                        'updated_at' => now(),
+                        'created_at' => now(),
+                    ]
+                );
+                $updatedTerritories++;
+            }
+        }
+
+        $this->info("  Hierarchy rebuild updated {$updatedParents} parent links and {$updatedTerritories} territory rows.");
+    }
+
+    private function wipeImportedLegacyUsers(): void
+    {
+        $this->warn('  --fresh-users: wiping previously imported legacy users, staff links, and territory assignments...');
+
+        $legacyUserIds = DB::table('users')
+            ->whereNotNull('legacy_source')
+            ->pluck('id')
+            ->all();
+
+        if ($legacyUserIds === []) {
+            return;
+        }
+
+        DB::table('franchisee_staff')->whereIn('user_id', $legacyUserIds)->delete();
+        DB::table('territory_assignments')->whereIn('user_id', $legacyUserIds)->delete();
+        DB::table('model_has_roles')
+            ->where('model_type', User::class)
+            ->whereIn('model_id', $legacyUserIds)
+            ->delete();
+        DB::table('model_has_permissions')
+            ->where('model_type', User::class)
+            ->whereIn('model_id', $legacyUserIds)
+            ->delete();
+        DB::table('users')->whereIn('id', $legacyUserIds)->delete();
+    }
+
+    private function loadImportedUserMap(): array
+    {
+        $map = [];
+
+        foreach (DB::table('users')
+            ->whereNotNull('legacy_source')
+            ->whereNotNull('legacy_user_id')
+            ->select('id', 'legacy_source', 'legacy_user_id')
+            ->get() as $row) {
+            $map[$row->legacy_source][(int) $row->legacy_user_id] = (int) $row->id;
+        }
+
+        return $map;
+    }
+
+    private function collectLegacyUsers(string $filePath, string $source, ?array $onlyIds = null): array
+    {
+        $rows = [];
+        $filterIds = $onlyIds !== null ? array_flip(array_map('intval', $onlyIds)) : null;
+
+        foreach (LegacySqlReader::streamTableRows($filePath, 'users') as $row) {
+            $legacyId = (int) ($row['id'] ?? 0);
+            if ($legacyId <= 0) {
+                continue;
+            }
+
+            if ($filterIds !== null && !isset($filterIds[$legacyId])) {
+                continue;
+            }
+
+            $role = $this->mapLegacyTypeToRole($row['type'] ?? null, $source);
+            if ($role === null) {
+                continue;
+            }
+
+            $row['_legacy_source'] = $source;
+            $rows[$legacyId] = $row;
+        }
+
+        return $rows;
+    }
+
+    private function collectFranchiseStaffContext(string $franFile): array
+    {
+        $rows = [];
+        $staffUserIds = [];
+        $ownerUserIds = [];
+
+        foreach (LegacySqlReader::streamTableRows($franFile, 'franchisee_users') as $row) {
+            $rows[] = $row;
+
+            $staffUserId = (int) ($row['user_id'] ?? 0);
+            $ownerUserId = (int) ($row['created_by'] ?? 0);
+
+            if ($staffUserId > 0) {
+                $staffUserIds[] = $staffUserId;
+            }
+
+            if ($ownerUserId > 0) {
+                $ownerUserIds[] = $ownerUserId;
+            }
+        }
+
+        return [
+            'rows' => $rows,
+            'staff_user_ids' => array_values(array_unique($staffUserIds)),
+            'owner_user_ids' => array_values(array_unique($ownerUserIds)),
+        ];
+    }
+
+    private function upsertLegacyUsers(array $legacyUsers, bool $resolveParent): array
+    {
+        $importedRows = [];
+        $created = 0;
+        $updated = 0;
+
+        foreach ($legacyUsers as $legacyId => $row) {
+            $source = (string) ($row['_legacy_source'] ?? self::HO_USER_SOURCE);
+            $existingId = $this->resolveImportedUserId($source, (int) $legacyId);
+            $payload = $this->buildUserPayload($row, $source, $existingId);
+
+            if ($existingId) {
+                $updatePayload = $payload;
+                unset($updatePayload['created_at']);
+
+                DB::table('users')->where('id', $existingId)->update($updatePayload);
+                $newUserId = $existingId;
+                $updated++;
+            } else {
+                $newUserId = (int) DB::table('users')->insertGetId($payload);
+                $created++;
+            }
+
+            $this->importedUserIdMap[$source][(int) $legacyId] = $newUserId;
+            $importedRows[$newUserId] = $row;
+            $importedRows[$newUserId]['_new_user_id'] = $newUserId;
+
+            if ($resolveParent) {
+                $importedRows[$newUserId]['_legacy_parent_id'] = (int) ($row['parent_id'] ?? 0);
+            }
+        }
+
+        $this->info("  Imported {$created} legacy users" . ($updated ? " and updated {$updated}" : '') . '.');
+
+        return $importedRows;
+    }
+
+    private function buildUserPayload(array $row, string $source, ?int $existingId): array
+    {
+        $legacyId = (int) ($row['id'] ?? 0);
+        $rawUsername = trim((string) ($row['username'] ?? ''));
+        $rawEmail = trim((string) ($row['email'] ?? ''));
+        $name = trim((string) ($row['fullname'] ?? ''));
+        $passwordHash = trim((string) ($row['password'] ?? ''));
+        $franchiseeId = $this->resolveFranchiseeId((int) ($row['franch_id'] ?? 0));
+        $role = $this->mapLegacyTypeToRole($row['type'] ?? null, $source);
+        $fallbackFranchiseUsername = $role === 'Franchisee' ? $this->resolveFranchiseeShopCode($franchiseeId) : null;
+
+        if ($name === '') {
+            $name = $rawUsername !== '' ? $rawUsername : ('Legacy User #' . $legacyId);
+        }
+
+        $mustResetPassword = !$this->isTrustedPasswordHash($passwordHash);
+        $finalPassword = $mustResetPassword ? Hash::make(Str::random(48)) : $passwordHash;
+
+        $preferences = $this->mergePreferences(
+            $existingId ? DB::table('users')->where('id', $existingId)->value('preferences') : null,
+            [
+                'legacy_migration' => [
+                    'source' => $source,
+                    'legacy_user_id' => $legacyId,
+                    'legacy_type' => (string) ($row['type'] ?? ''),
+                    'legacy_statecode' => (int) ($row['statecode'] ?? 0),
+                    'legacy_districtcode' => (string) ($row['districtcode'] ?? ''),
+                    'must_reset_password' => $mustResetPassword,
+                    'password_format' => $this->passwordFormat($passwordHash),
+                    'last_migrated_at' => now()->toIso8601String(),
+                ],
+            ]
+        );
+
+        $createdAt = $this->parseDateTime($row['created'] ?? null)
+            ?? $this->parseDateTime($row['created_at'] ?? null)
+            ?? now()->toDateTimeString();
+
+        $updatedAt = $this->parseDateTime($row['updated_at'] ?? null)
+            ?? $this->parseDateTime($row['modified'] ?? null)
+            ?? $createdAt;
+
+        return [
+            'name' => Str::limit($name, 255, ''),
+            'username' => $this->determineUniqueUsername($rawUsername !== '' ? $rawUsername : ($fallbackFranchiseUsername ?? ''), $source, $legacyId, $existingId),
+            'email' => $this->determineUniqueEmail($rawEmail, $source, $legacyId, $existingId),
+            'phone' => $this->sanitizePhone($row['mobileno'] ?? null),
+            'password' => $finalPassword,
+            'parent_id' => null,
+            'franchisee_id' => $franchiseeId,
+            'is_active' => $this->legacyUserIsActive($row),
+            'email_verified_at' => $this->legacyUserIsActive($row) ? $createdAt : null,
+            'legacy_source' => $source,
+            'legacy_user_id' => $legacyId,
+            'legacy_type' => (int) ($row['type'] ?? 0) ?: null,
+            'legacy_username' => $rawUsername !== '' ? $rawUsername : null,
+            'preferences' => $preferences,
+            'created_at' => $createdAt,
+            'updated_at' => $updatedAt,
+        ];
+    }
+
+    private function hydrateParentLinks(array $importedRows): void
+    {
+        foreach ($importedRows as $newUserId => $row) {
+            $legacyParentId = (int) ($row['_legacy_parent_id'] ?? 0);
+            if ($legacyParentId <= 0) {
+                continue;
+            }
+
+            $source = (string) ($row['_legacy_source'] ?? self::HO_USER_SOURCE);
+            $parentId = $this->resolveImportedUserId($source, $legacyParentId) ?: $this->resolveImportedUserIdAcrossSources($legacyParentId);
+
+            if ($parentId && $parentId !== (int) $newUserId) {
+                DB::table('users')->where('id', $newUserId)->update(['parent_id' => $parentId]);
+            }
+        }
+    }
+
+    private function syncRolesAndTerritories(array $importedRows): void
+    {
+        foreach ($importedRows as $newUserId => $row) {
+            $source = (string) ($row['_legacy_source'] ?? self::HO_USER_SOURCE);
+            $role = $this->mapLegacyTypeToRole($row['type'] ?? null, $source);
+            if ($role !== null) {
+                User::find($newUserId)?->syncRoles([$role]);
+            }
+
+            DB::table('territory_assignments')->where('user_id', $newUserId)->delete();
+
+            $stateId = (int) ($row['statecode'] ?? 0);
+            $districtIds = $this->parseDistrictIds((string) ($row['districtcode'] ?? ''));
+
+            if ($role === 'State Head' && $stateId > 0 && DB::table('states')->where('id', $stateId)->exists()) {
+                DB::table('territory_assignments')->insert([
+                    'user_id' => $newUserId,
+                    'territory_type' => 'state',
+                    'territory_id' => $stateId,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+
+            if (in_array($role, ['Regional Head', 'Zonal Head', 'District Head'], true)) {
+                foreach ($districtIds as $districtId) {
+                    if (!DB::table('districts')->where('id', $districtId)->exists()) {
+                        continue;
+                    }
+
+                    DB::table('territory_assignments')->updateOrInsert(
+                        [
+                            'user_id' => $newUserId,
+                            'territory_type' => 'district',
+                            'territory_id' => $districtId,
+                        ],
+                        [
+                            'updated_at' => now(),
+                            'created_at' => now(),
+                        ]
+                    );
+                }
+            }
+        }
+    }
+
+    private function migrateFranchiseeStaff(array $staffRows, array $franchiseUsers): void
+    {
+        $this->info('Migrating franchisee_users → franchisee_staff...');
+
+        $migrated = 0;
+        $skipped = 0;
+
+        foreach ($staffRows as $row) {
+            $legacyStaffUserId = (int) ($row['user_id'] ?? 0);
+            if ($legacyStaffUserId <= 0) {
+                $skipped++;
+                continue;
+            }
+
+            $newUserId = $this->resolveImportedUserId(self::FRAN_USER_SOURCE, $legacyStaffUserId)
+                ?: $this->resolveImportedUserId(self::HO_USER_SOURCE, $legacyStaffUserId);
+
+            if (!$newUserId) {
+                $skipped++;
+                continue;
+            }
+
+            $ownerLegacyId = (int) ($row['created_by'] ?? 0);
+            $ownerRow = $franchiseUsers[$ownerLegacyId] ?? null;
+            $staffLegacyRow = $franchiseUsers[$legacyStaffUserId] ?? null;
+
+            $franchiseeId = $this->resolveFranchiseeId((int) ($ownerRow['franch_id'] ?? 0))
+                ?: $this->resolveFranchiseeId((int) ($staffLegacyRow['franch_id'] ?? 0));
+
+            if (!$franchiseeId) {
+                $skipped++;
+                continue;
+            }
+
+            $ownerNewUserId = $ownerLegacyId > 0
+                ? ($this->resolveImportedUserId(self::HO_USER_SOURCE, $ownerLegacyId)
+                    ?: $this->resolveImportedUserId(self::FRAN_USER_SOURCE, $ownerLegacyId))
+                : null;
+
+            DB::table('users')->where('id', $newUserId)->update([
+                'franchisee_id' => $franchiseeId,
+                'parent_id' => $ownerNewUserId ?: DB::table('users')->where('id', $newUserId)->value('parent_id'),
+                'phone' => $this->sanitizePhone($row['fu_mobile'] ?? null) ?: DB::table('users')->where('id', $newUserId)->value('phone'),
+                'updated_at' => now(),
+            ]);
+
+            DB::table('franchisee_staff')->updateOrInsert(
+                [
+                    'franchisee_id' => $franchiseeId,
+                    'user_id' => $newUserId,
+                ],
+                [
+                    'designation' => 'Legacy Franchise Staff',
+                    'is_active' => $this->legacyUserIsActive($staffLegacyRow ?? []),
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]
+            );
+
+            User::find($newUserId)?->syncRoles(['Franchisee']);
+            $migrated++;
+        }
+
+        $this->info("  Migrated {$migrated} franchise staff records" . ($skipped ? " (skipped {$skipped})" : '') . '.');
+    }
+
+    private function resolveImportedUserId(string $source, int $legacyId): ?int
+    {
+        return $this->importedUserIdMap[$source][$legacyId] ?? null;
+    }
+
+    private function resolveImportedUserIdAcrossSources(int $legacyId): ?int
+    {
+        foreach ($this->importedUserIdMap as $idsBySource) {
+            if (isset($idsBySource[$legacyId])) {
+                return $idsBySource[$legacyId];
+            }
+        }
+
+        return null;
+    }
+
+    private function resolveFranchiseeId(int $legacyFranchiseId): ?int
+    {
+        if ($legacyFranchiseId <= 0) {
+            return null;
+        }
+
+        return DB::table('franchisees')->where('id', $legacyFranchiseId)->value('id')
+            ?: DB::table('franchisees')
+                ->where('legacy_source', self::FRANCHISE_SOURCE)
+                ->where('legacy_franchise_id', $legacyFranchiseId)
+                ->value('id');
+    }
+
+    private function mapLegacyTypeToRole($type, ?string $source = null): ?string
+    {
+        $source = $source ?: self::HO_USER_SOURCE;
+
+        if ($source === self::HO_USER_SOURCE) {
+            return match ((string) $type) {
+                '1' => 'Admin',
+                '2' => 'State Head',
+                '3' => 'Regional Head',
+                '4' => 'District Head',
+                '5' => 'Franchisee',
+                '6' => 'Distributer',
+                '7' => 'Sales Team',
+                '8' => 'Account',
+                '9' => $this->firstAvailableRole(['Order', 'Distributer']),
+                '10' => $this->firstAvailableRole(['Warehouse', 'Distributer']),
+                '11' => $this->firstAvailableRole(['Inward', 'Warehouse']),
+                default => null,
+            };
+        }
+
+        return match ((string) $type) {
+            '1' => 'Admin',
+            '2' => 'State Head',
+            '3' => 'Regional Head',
+            '4' => 'District Head',
+            '5' => 'Franchisee',
+            '6' => 'Distributer',
+            '7' => 'Sales Team',
+            '8' => 'Zonal Head',
+            '9' => 'Account',
+            '10' => 'Franchisee',
+            default => null,
+        };
+    }
+
+    private function firstAvailableRole(array $candidates): ?string
+    {
+        foreach ($candidates as $candidate) {
+            if ($this->roleExists($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private function roleExists(string $roleName): bool
+    {
+        if (array_key_exists($roleName, $this->roleExistsCache)) {
+            return $this->roleExistsCache[$roleName];
+        }
+
+        $exists = DB::table('roles')->where('name', $roleName)->exists();
+        $this->roleExistsCache[$roleName] = $exists;
+
+        return $exists;
+    }
+
+    private function resolveFranchiseeShopCode(?int $franchiseeId): ?string
+    {
+        if (!$franchiseeId) {
+            return null;
+        }
+
+        if (array_key_exists($franchiseeId, $this->franchiseeCodeCache)) {
+            return $this->franchiseeCodeCache[$franchiseeId];
+        }
+
+        $shopCode = DB::table('franchisees')->where('id', $franchiseeId)->value('shop_code');
+        $shopCode = is_string($shopCode) ? trim($shopCode) : null;
+        $this->franchiseeCodeCache[$franchiseeId] = $shopCode !== '' ? $shopCode : null;
+
+        return $this->franchiseeCodeCache[$franchiseeId];
+    }
+
+    private function legacyUserIsActive(array $row): bool
+    {
+        $activated = (int) ($row['activated'] ?? 1) === 1;
+        $notBanned = (int) ($row['banned'] ?? 0) !== 1;
+        $legacyActive = !isset($row['is_active']) || (int) $row['is_active'] === 1;
+
+        return $activated && $notBanned && $legacyActive;
+    }
+
+    private function determineUniqueUsername(string $preferred, string $source, int $legacyId, ?int $existingId): string
+    {
+        $candidate = trim($preferred);
+        $candidate = preg_replace('/[^A-Za-z0-9_-]/', '_', $candidate) ?: '';
+
+        if ($candidate === '') {
+            $candidate = Str::lower(Str::slug($source . '_' . $legacyId, '_'));
+        }
+
+        $base = Str::limit($candidate, 50, '');
+        $candidate = $base;
+        $suffix = 1;
+
+        while ($this->usernameTakenByAnotherUser($candidate, $existingId)) {
+            $tail = '_' . $legacyId . ($suffix > 1 ? '_' . $suffix : '');
+            $candidate = Str::limit($base, max(1, 50 - strlen($tail)), '') . $tail;
+            $suffix++;
+        }
+
+        return $candidate;
+    }
+
+    private function determineUniqueEmail(string $rawEmail, string $source, int $legacyId, ?int $existingId): string
+    {
+        $email = strtolower(trim($rawEmail));
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $email = Str::lower(Str::slug($source, '_')) . '+' . $legacyId . '@migrated.local';
+        }
+
+        if (!$this->emailTakenByAnotherUser($email, $existingId)) {
+            return $email;
+        }
+
+        $localPart = Str::before($email, '@');
+        $domain = Str::after($email, '@');
+        $suffix = 1;
+
+        do {
+            $candidate = $localPart . '+' . $legacyId . ($suffix > 1 ? '_' . $suffix : '') . '@' . $domain;
+            $suffix++;
+        } while ($this->emailTakenByAnotherUser($candidate, $existingId));
+
+        return $candidate;
+    }
+
+    private function usernameTakenByAnotherUser(string $username, ?int $existingId): bool
+    {
+        $query = DB::table('users')->where('username', $username);
+        if ($existingId) {
+            $query->where('id', '!=', $existingId);
+        }
+
+        return $query->exists();
+    }
+
+    private function emailTakenByAnotherUser(string $email, ?int $existingId): bool
+    {
+        $query = DB::table('users')->where('email', $email);
+        if ($existingId) {
+            $query->where('id', '!=', $existingId);
+        }
+
+        return $query->exists();
+    }
+
+    private function sanitizePhone($value): ?string
+    {
+        $phone = preg_replace('/[^0-9]/', '', trim((string) ($value ?? '')));
+        if ($phone === '') {
+            return null;
+        }
+
+        return substr($phone, 0, 15);
+    }
+
+    private function isTrustedPasswordHash(string $hash): bool
+    {
+        return preg_match('/^\$2[aby]\$/', $hash) === 1;
+    }
+
+    private function passwordFormat(string $hash): string
+    {
+        if ($this->isTrustedPasswordHash($hash)) {
+            return 'bcrypt';
+        }
+
+        if (str_starts_with($hash, '$P$') || str_starts_with($hash, '$H$')) {
+            return 'phpass';
+        }
+
+        return $hash === '' ? 'missing' : 'unknown';
+    }
+
+    private function mergePreferences($existingJson, array $patch): string
+    {
+        $existing = [];
+        if (is_string($existingJson) && $existingJson !== '') {
+            $decoded = json_decode($existingJson, true);
+            if (is_array($decoded)) {
+                $existing = $decoded;
+            }
+        }
+
+        $merged = array_replace_recursive($existing, $patch);
+
+        return json_encode($merged, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
+    private function parseDateTime($value): ?string
+    {
+        $v = trim((string) ($value ?? ''));
+        if ($v === '' || $v === '0000-00-00 00:00:00' || $v === '0000-00-00') {
+            return null;
+        }
+
+        try {
+            $dt = new \DateTime($v);
+            $year = (int) $dt->format('Y');
+            if ($year < 1950 || $year > 2035) {
+                return null;
+            }
+
+            return $dt->format('Y-m-d H:i:s');
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    private function parseDistrictIds(string $value): array
+    {
+        $parts = array_filter(array_map('trim', explode(',', $value)), fn (string $part) => $part !== '' && is_numeric($part));
+
+        return array_values(array_unique(array_map('intval', $parts)));
     }
 
     private function mapStatus(string $franchStatus, string $menuStatus): string
