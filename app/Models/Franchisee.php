@@ -35,6 +35,8 @@ class Franchisee extends Model
         // Approval
         'status', 'approved_by', 'approved_at', 'activated_at',
         'deactivated_at', 'rejection_reason',
+        // Commission configuration
+        'purchase_commission_percent', 'sales_commission_percent', 'tds_percent',
         // Hierarchy
         'district_head_id', 'zone_head_id', 'state_head_id',
         // Migration traceability
@@ -52,6 +54,9 @@ class Franchisee extends Model
         'investment_amount' => 'decimal:2',
         'latitude' => 'decimal:7',
         'longitude' => 'decimal:7',
+        'purchase_commission_percent' => 'decimal:2',
+        'sales_commission_percent' => 'decimal:2',
+        'tds_percent' => 'decimal:2',
     ];
 
     // ─── Status Checks ───

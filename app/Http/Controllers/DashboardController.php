@@ -111,7 +111,7 @@ class DashboardController extends Controller
 
         $activeFranchisees = (clone $franchisees)->active()->count();
         $pendingFranchisees = (clone $franchisees)->pending()->count();
-        $openOrders = (clone $orders)->whereIn('status', ['pending', 'accepted'])->count();
+        $openOrders = (clone $orders)->whereIn('status', ['pending', 'accepted', 'allocated'])->count();
         $riskOrders = (clone $orders)->where('status', 'pending')->where('created_at', '<=', now()->subDays(2))->count();
 
         return [
@@ -133,7 +133,7 @@ class DashboardController extends Controller
             ],
             'actions' => [
                 $this->action('Franchise Network', 'Review registrations, approvals, and active stores.', route('admin.franchisees.index'), 'emerald'),
-                $this->action('Distribution Orders', 'Run pending, accepted, and dispatched order operations.', route('admin.dist-orders.index'), 'sky'),
+                $this->action('Distribution Orders', 'Run review, allocation, and dispatch operations.', route('admin.dist-orders.index'), 'sky'),
                 $this->action('Product Catalog', 'Control products, companies, salts, and tax masters.', route('admin.products.index'), 'indigo'),
                 $this->action('Procurement Desk', 'Monitor suppliers and purchase documents.', route('admin.purchase-invoices.index'), 'violet'),
             ],
@@ -317,7 +317,8 @@ class DashboardController extends Controller
         $orders = DistOrder::query();
         $pending = (clone $orders)->where('status', 'pending')->count();
         $accepted = (clone $orders)->where('status', 'accepted')->count();
-        $agedAccepted = (clone $orders)->where('status', 'accepted')->where('accepted_at', '<=', now()->subDays(1))->count();
+        $allocated = (clone $orders)->where('status', 'allocated')->count();
+        $agedAllocated = (clone $orders)->where('status', 'allocated')->where('accepted_at', '<=', now()->subDays(1))->count();
 
         return [
             'title' => 'Distributer Order Desk',
@@ -328,22 +329,24 @@ class DashboardController extends Controller
             'leaderboard' => $this->topFranchiseeSales(null),
             'alerts' => array_values(array_filter([
                 $pending > 15 ? $this->alert('medium', 'High pending queue', $pending . ' orders are waiting for initial review.', route('admin.dist-orders.index', ['status' => 'pending'])) : null,
-                $agedAccepted > 0 ? $this->alert('high', 'Dispatch delay risk', $agedAccepted . ' accepted order(s) are pending dispatch beyond 24h.', route('admin.dist-orders.index', ['status' => 'accepted'])) : null,
+                $agedAllocated > 0 ? $this->alert('high', 'Dispatch delay risk', $agedAllocated . ' allocated order(s) are pending dispatch beyond 24h.', route('admin.dist-orders.index', ['status' => 'allocated'])) : null,
             ])),
             'focus' => [
                 ['label' => 'Intake', 'value' => $pending . ' pending approvals'],
-                ['label' => 'Dispatch Queue', 'value' => $accepted . ' ready-to-dispatch orders'],
-                ['label' => 'Backlog Risk', 'value' => $agedAccepted . ' accepted beyond 24h'],
+                ['label' => 'Allocation Queue', 'value' => $accepted . ' approved orders awaiting batches'],
+                ['label' => 'Dispatch Queue', 'value' => $allocated . ' allocated orders ready for logistics'],
             ],
             'actions' => [
                 $this->action('Pending Orders', 'Review newly submitted franchise orders.', route('admin.dist-orders.index', ['status' => 'pending']), 'amber'),
-                $this->action('Dispatch Queue', 'Move accepted orders into shipment execution.', route('admin.dist-orders.index', ['status' => 'accepted']), 'sky'),
+                $this->action('Allocation Queue', 'Assign warehouse batches after commercial review.', route('admin.dist-orders.index', ['status' => 'accepted']), 'sky'),
+                $this->action('Dispatch Queue', 'Move allocated orders into shipment execution.', route('admin.dist-orders.index', ['status' => 'allocated']), 'emerald'),
                 $this->action('Purchase Invoices', 'Track procurement and replenishment intake.', route('admin.purchase-invoices.index'), 'violet'),
                 $this->action('Supplier Base', 'Manage upstream procurement partners.', route('admin.suppliers.index'), 'indigo'),
             ],
             'workflows' => [
                 $this->workflow('Order desk', 'Accept, reject, and triage incoming franchise demand.', 'live', route('admin.dist-orders.index')),
-                $this->workflow('Dispatch movement', 'Allocate and ship accepted orders from HO.', 'live', route('admin.dist-orders.index', ['status' => 'accepted'])),
+                $this->workflow('Allocation movement', 'Lock warehouse batches before shipment execution.', 'live', route('admin.dist-orders.index', ['status' => 'accepted'])),
+                $this->workflow('Dispatch movement', 'Ship allocated orders from HO into franchise inventory.', 'active', route('admin.dist-orders.index', ['status' => 'allocated'])),
                 $this->workflow('Procurement support', 'Feed inventory through supplier-side documents.', 'active', route('admin.purchase-invoices.index')),
             ],
             'stats' => [
@@ -356,12 +359,20 @@ class DashboardController extends Controller
                     'href' => route('admin.dist-orders.index', ['status' => 'pending']),
                 ],
                 [
-                    'name' => 'Ready To Dispatch',
+                    'name' => 'Pending Allocation',
                     'value' => $this->formatCount((clone $orders)->where('status', 'accepted')->count()),
-                    'context' => 'Accepted orders that can move to logistics.',
+                    'context' => 'Commercially approved orders waiting on batch locking.',
                     'icon' => 'TruckIcon',
                     'tone' => 'sky',
                     'href' => route('admin.dist-orders.index', ['status' => 'accepted']),
+                ],
+                [
+                    'name' => 'Ready To Dispatch',
+                    'value' => $this->formatCount((clone $orders)->where('status', 'allocated')->count()),
+                    'context' => 'Allocated orders that can move to logistics.',
+                    'icon' => 'CheckCircleIcon',
+                    'tone' => 'emerald',
+                    'href' => route('admin.dist-orders.index', ['status' => 'allocated']),
                 ],
                 [
                     'name' => 'Dispatched Orders',
@@ -677,6 +688,7 @@ class DashboardController extends Controller
         return [
             'pending' => (int) ($rows['pending'] ?? 0),
             'accepted' => (int) ($rows['accepted'] ?? 0),
+            'allocated' => (int) ($rows['allocated'] ?? 0),
             'dispatched' => (int) ($rows['dispatched'] ?? 0),
             'delivered' => (int) ($rows['delivered'] ?? 0),
             'rejected' => (int) ($rows['rejected'] ?? 0),

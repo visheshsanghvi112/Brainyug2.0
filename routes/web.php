@@ -7,6 +7,7 @@ use App\Http\Controllers\FinancialLedgerController;
 use App\Http\Controllers\FranchiseApplicationController;
 use App\Http\Controllers\FranchiseStaffController;
 use App\Http\Controllers\MeetingController;
+use App\Http\Controllers\AnnouncementController;
 use App\Http\Controllers\POSController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ReportController;
@@ -219,7 +220,7 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
         // ── B2B Distribution Orders ─────────────────────────────────────────
         // READ: franchisees see their own orders; HO/Distributer sees all — scoped in controller
         // WRITE: only dispatch-capable roles
-        Route::middleware('erp.role:Super Admin|Admin|Distributer|Franchisee')->group(function () {
+        Route::middleware('erp.role:Super Admin|Admin|Distributer|Sales Team|Franchisee')->group(function () {
             Route::resource('dist-orders', DistOrderController::class)
                 ->only(['index', 'show'])
                 ->whereNumber('dist_order');
@@ -244,9 +245,10 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
                 ->whereNumber('dist_order');
         });
 
-        Route::middleware('erp.role:Super Admin|Admin|Distributer|Account')
+        Route::middleware('erp.role:Super Admin|Admin|Distributer|Sales Team|Account')
             ->group(function () {
                 Route::post('dist-orders/{dist_order}/accept',   [DistOrderController::class, 'accept'])->name('dist-orders.accept');
+                Route::post('dist-orders/{dist_order}/allocate', [DistOrderController::class, 'allocate'])->name('dist-orders.allocate');
                 Route::post('dist-orders/{dist_order}/dispatch', [DistOrderController::class, 'dispatchOrder'])->name('dist-orders.dispatch');
                 Route::post('dist-orders/{dist_order}/reject',   [DistOrderController::class, 'reject'])->name('dist-orders.reject');
                 Route::post('dist-orders/{dist_order}/payments/{dist_order_payment}/confirm', [DistOrderController::class, 'confirmPayment'])->name('dist-orders.payments.confirm');
@@ -264,6 +266,7 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
         ->group(function () {
             Route::get(   '/cart',          [CartController::class, 'index'])->name('cart.index');
             Route::post(  '/cart/add',      [CartController::class, 'addToCart'])->name('cart.add');
+            Route::patch( '/cart/{item}',   [CartController::class, 'updateQty'])->name('cart.updateQty')->whereNumber('item');
             Route::delete('/cart/{item}',   [CartController::class, 'remove'])->name('cart.remove')->whereNumber('item');
             Route::post(  '/cart/checkout', [CartController::class, 'checkout'])->name('cart.checkout');
         });
@@ -277,6 +280,8 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
         ->middleware('erp.role:Franchisee|Super Admin')
         ->group(function () {
             Route::get( '/',         [POSController::class, 'index'])->name('index');
+            Route::get( '/settings',  [POSController::class, 'settings'])->name('settings');
+            Route::patch('/settings', [POSController::class, 'updateSettings'])->name('settings.update');
             Route::post('/checkout', [POSController::class, 'checkout'])->name('checkout');
 
             // AJAX helpers
@@ -289,9 +294,25 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
             Route::post('/doctors/search',    [POSController::class, 'searchDoctors'])->name('searchDoctors');
             Route::post('/doctors/store',     [POSController::class, 'storeDoctor'])->name('storeDoctor');
             Route::get( '/bill-number',       [POSController::class, 'nextBillNumber'])->name('nextBillNumber');
+            Route::get( '/shift/status',      [POSController::class, 'shiftStatus'])->name('shift.status');
+            Route::post('/shift/open',        [POSController::class, 'openShift'])->name('shift.open');
+            Route::post('/shift/close',       [POSController::class, 'closeShift'])->name('shift.close');
+            Route::post('/estimate/print',    [POSController::class, 'estimatePrint'])->name('estimate.print');
+            Route::post('/estimate/export',   [POSController::class, 'estimateExport'])->name('estimate.export');
+            Route::post('/override/authorize', [POSController::class, 'authorizeOverride'])->name('override.authorize');
             Route::post('/credit-info',       [POSController::class, 'customerCreditInfo'])->name('customerCreditInfo');
+            Route::post('/customer-recent-bills', [POSController::class, 'customerRecentBills'])->name('customerRecentBills');
+            Route::get( '/bills/{salesInvoice}/items', [POSController::class, 'billItems'])->name('billItems')->whereNumber('salesInvoice');
             Route::post('/credit-collect',    [POSController::class, 'collectCredit'])->name('creditCollect');
             Route::post('/return',            [POSController::class, 'processReturn'])->name('processReturn');
+            Route::post('/holds',             [POSController::class, 'saveHold'])->name('holds.save');
+            Route::get( '/holds',             [POSController::class, 'listHolds'])->name('holds.index');
+            Route::get( '/holds/{posHold}',   [POSController::class, 'loadHold'])->name('holds.show')->whereNumber('posHold');
+            Route::post('/holds/{posHold}/release-lock', [POSController::class, 'releaseHoldLock'])->name('holds.releaseLock')->whereNumber('posHold');
+            Route::delete('/holds/{posHold}', [POSController::class, 'cancelHold'])->name('holds.cancel')->whereNumber('posHold');
+            Route::post('/quotations', [POSController::class, 'storeQuotation'])->name('quotations.store');
+            Route::post('/quotations/customer', [POSController::class, 'customerQuotations'])->name('quotations.customer');
+            Route::get( '/quotations/{salesQuotation}', [POSController::class, 'quotationDetails'])->name('quotations.show')->whereNumber('salesQuotation');
 
             // Invoice browser — list, detail, print, cancel
             Route::get( '/invoices',                       [SalesInvoiceController::class, 'index'])->name('invoices.index');
@@ -379,6 +400,31 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
 
     /*
     |--------------------------------------------------------------------------
+    | Notice Board / Announcements
+    | All authenticated users can read active notices; HO admins manage them.
+    |--------------------------------------------------------------------------
+    */
+    Route::get('announcements', [AnnouncementController::class, 'index'])
+        ->name('announcements.index');
+
+    Route::middleware('erp.role:Super Admin|Admin')->group(function () {
+        Route::get('announcements/create', [AnnouncementController::class, 'create'])
+            ->name('announcements.create');
+        Route::post('announcements', [AnnouncementController::class, 'store'])
+            ->name('announcements.store');
+        Route::get('announcements/{announcement}/edit', [AnnouncementController::class, 'edit'])
+            ->name('announcements.edit')
+            ->whereNumber('announcement');
+        Route::put('announcements/{announcement}', [AnnouncementController::class, 'update'])
+            ->name('announcements.update')
+            ->whereNumber('announcement');
+        Route::delete('announcements/{announcement}', [AnnouncementController::class, 'destroy'])
+            ->name('announcements.destroy')
+            ->whereNumber('announcement');
+    });
+
+    /*
+    |--------------------------------------------------------------------------
     | Shop Visit Audits
     | Territory heads create audits; franchisees read their own.
     | Controller enforces the ownership/scope internally.
@@ -431,7 +477,15 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
 
         // MIS / Business Intelligence — HO + territory heads only
         Route::middleware('erp.role:Super Admin|Admin|State Head|Regional Head|Zonal Head|District Head')
-            ->get('/bi/top-products', [ReportController::class, 'topProducts'])->name('bi.top-products');
+            ->group(function () {
+                Route::get('/bi/top-products', [ReportController::class, 'topProducts'])->name('bi.top-products');
+                Route::get('/bi/franchisee-sales', [ReportController::class, 'franchiseeSales'])->name('bi.franchisee-sales');
+                Route::get('/bi/growth', [ReportController::class, 'growth'])->name('bi.growth');
+            });
+
+        Route::middleware('erp.role:Super Admin|Admin|State Head|Regional Head|Zonal Head|District Head|Distributer')
+            ->get('/stock/near-expiry-dispatch', [ReportController::class, 'nearExpiryDispatch'])
+            ->name('stock.near-expiry-dispatch');
 
         // Finance — HO + Account role (payables are commercially sensitive)
         Route::middleware('erp.role:Super Admin|Admin|Account')
@@ -443,3 +497,4 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
 });
 
 require __DIR__.'/auth.php';
+

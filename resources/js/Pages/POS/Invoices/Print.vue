@@ -1,6 +1,6 @@
 <script setup>
 import { Head } from '@inertiajs/vue3'
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 const props = defineProps({
     invoice: {
@@ -13,9 +13,21 @@ const props = defineProps({
     },
 })
 
-const receiptLayout = computed(() => props.printPreferences?.receipt_layout === 'a4' ? 'a4' : 'thermal')
+const queryLayout = ref(null)
+const queryPaper = ref(null)
+
+const receiptLayout = computed(() => {
+    if (queryLayout.value === 'a4') {
+        return 'a4'
+    }
+    return props.printPreferences?.receipt_layout === 'a4' ? 'a4' : 'thermal'
+})
 const autoPrint = computed(() => props.printPreferences?.auto_print_after_checkout !== false)
 const printerPaperWidth = computed(() => {
+    if (queryPaper.value && ['58mm', '72mm', '80mm', 'a4'].includes(queryPaper.value)) {
+        return queryPaper.value
+    }
+
     const width = props.printPreferences?.printer_paper_width
     return ['58mm', '72mm', '80mm', 'a4'].includes(width) ? width : '80mm'
 })
@@ -34,6 +46,12 @@ const printerMeta = computed(() => ({
     openCashDrawer: props.printPreferences?.open_cash_drawer === true,
     eposTimeoutMs: Number(props.printPreferences?.epos_timeout_ms ?? 5000),
 }))
+const billLogoUrl = computed(() => {
+    const value = String(props.printPreferences?.bill_logo_url || '').trim()
+    return value
+})
+const billHeaderLine1 = computed(() => String(props.printPreferences?.bill_header_line_1 || '').trim())
+const billHeaderLine2 = computed(() => String(props.printPreferences?.bill_header_line_2 || '').trim())
 
 const thermalWidthClass = computed(() => {
     if (receiptLayout.value === 'a4' || printerPaperWidth.value === 'a4') {
@@ -52,6 +70,18 @@ const thermalWidthClass = computed(() => {
 })
 
 onMounted(() => {
+    const params = new URLSearchParams(window.location.search)
+    const layout = params.get('layout')
+    const paper = params.get('paper')
+
+    if (layout && ['thermal', 'a4'].includes(layout)) {
+        queryLayout.value = layout
+    }
+
+    if (paper && ['58mm', '72mm', '80mm', 'a4'].includes(paper)) {
+        queryPaper.value = paper
+    }
+
     if (!autoPrint.value) {
         return
     }
@@ -75,7 +105,16 @@ onMounted(() => {
     <div class="print-container" :class="[{ 'a4-layout': receiptLayout === 'a4' || printerPaperWidth === 'a4' }, thermalWidthClass]">
         <!-- Thermal Printer Friendly Layout -->
         <div class="text-center mb-4">
+            <img
+                v-if="billLogoUrl"
+                :src="billLogoUrl"
+                alt="Shop Logo"
+                class="mx-auto mb-2 h-12 w-auto object-contain"
+                @error="(event) => { event.target.style.display = 'none' }"
+            >
             <h1 class="text-xl font-bold">{{ invoice.franchisee?.shop_name || 'BrainYug ERP' }}</h1>
+            <p v-if="billHeaderLine1" class="text-xs font-semibold">{{ billHeaderLine1 }}</p>
+            <p v-if="billHeaderLine2" class="text-xs">{{ billHeaderLine2 }}</p>
             <p class="text-sm">{{ invoice.franchisee?.address || 'HQ Address' }}</p>
             <p class="text-sm font-semibold">GSTIN: {{ invoice.franchisee?.gst_number || 'N/A' }}</p>
             <p class="text-sm">Ph: {{ invoice.franchisee?.mobile || 'N/A' }}</p>
@@ -112,17 +151,29 @@ onMounted(() => {
         </table>
 
         <div class="border-t border-black pt-2 text-sm text-right">
+            <div class="flex justify-between">
+                <span>Subtotal:</span>
+                <span>₹{{ Number(invoice.sub_total || 0).toFixed(2) }}</span>
+            </div>
+            <div class="flex justify-between" v-if="Number(invoice.total_discount_amount || 0) > 0">
+                <span>Discount:</span>
+                <span>- ₹{{ Number(invoice.total_discount_amount).toFixed(2) }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span>GST:</span>
+                <span>₹{{ Number(invoice.total_tax_amount || 0).toFixed(2) }}</span>
+            </div>
+            <div class="flex justify-between" v-if="Number(invoice.other_charges || 0) > 0">
+                <span>Other Charges:</span>
+                <span>₹{{ Number(invoice.other_charges).toFixed(2) }}</span>
+            </div>
+            <div class="flex justify-between" v-if="Number(invoice.round_off || 0) !== 0">
+                <span>Round Off:</span>
+                <span>₹{{ Number(invoice.round_off).toFixed(2) }}</span>
+            </div>
             <div class="flex justify-between font-bold">
                 <span>Net Amount:</span>
                 <span>₹{{ Number(invoice.total_amount).toFixed(2) }}</span>
-            </div>
-            <div class="flex justify-between text-xs mt-1">
-                <span>Tax Included (GST):</span>
-                <span>₹{{ Number(invoice.total_tax_amount).toFixed(2) }}</span>
-            </div>
-            <div class="flex justify-between text-xs mt-1" v-if="invoice.total_discount_amount > 0">
-                <span>Discount Saved:</span>
-                <span>₹{{ Number(invoice.total_discount_amount).toFixed(2) }}</span>
             </div>
         </div>
 

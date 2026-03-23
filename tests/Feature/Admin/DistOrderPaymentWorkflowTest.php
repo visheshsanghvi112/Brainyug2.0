@@ -8,6 +8,7 @@ use App\Models\DistOrder;
 use App\Models\DistOrderPayment;
 use App\Models\FinancialLedger;
 use App\Models\Franchisee;
+use App\Models\FranchiseeStaff;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -27,6 +28,65 @@ class DistOrderPaymentWorkflowTest extends TestCase
         $this->withoutMiddleware([
             EnsureTwoFactorIsVerified::class,
             EnsurePasswordResetCompleted::class,
+        ]);
+    }
+
+    public function test_franchise_staff_can_view_and_pay_for_own_franchise_orders(): void
+    {
+        $owner = $this->makeFranchiseUser('fr_staff_owner', [
+            'module.dist_orders.view',
+            'module.dist_orders.create',
+        ]);
+
+        $staffRole = $this->makeRole('Franchisee Staff', [
+            'module.dist_orders.view',
+            'module.dist_orders.create',
+        ]);
+
+        $staff = User::factory()->create([
+            'username' => 'staff_' . Str::lower(Str::random(6)),
+            'is_active' => true,
+            'franchisee_id' => null,
+        ]);
+        $staff->assignRole($staffRole);
+
+        FranchiseeStaff::create([
+            'franchisee_id' => $owner->franchisee_id,
+            'user_id' => $staff->id,
+            'designation' => 'Cashier',
+            'is_active' => true,
+        ]);
+
+        $order = $this->createDistOrder($owner, [
+            'order_number' => 'ORD-STAFF-001',
+            'total_amount' => 450,
+            'status' => 'dispatched',
+        ]);
+
+        $this->actingAs($staff)
+            ->get(route('admin.dist-orders.index'))
+            ->assertOk()
+            ->assertSee('ORD-STAFF-001');
+
+        $this->actingAs($staff)
+            ->get(route('admin.dist-orders.show', $order->id))
+            ->assertOk()
+            ->assertSee('ORD-STAFF-001');
+
+        $this->actingAs($staff)
+            ->post(route('admin.dist-orders.payments.store', $order->id), [
+                'amount' => 200,
+                'payment_mode' => 'upi',
+                'reference_no' => 'UPI-STAFF-1',
+                'payment_date' => now()->toDateString(),
+            ])
+            ->assertRedirect();
+
+        $this->assertDatabaseHas('dist_order_payments', [
+            'dist_order_id' => $order->id,
+            'created_by' => $staff->id,
+            'amount' => 200,
+            'status' => 'pending',
         ]);
     }
 

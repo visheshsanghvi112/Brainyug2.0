@@ -111,7 +111,8 @@ const pipelineRows = computed(() => {
 
     const rows = [
         { key: 'pending', label: 'Pending', tone: 'bg-amber-500' },
-        { key: 'accepted', label: 'Accepted', tone: 'bg-sky-500' },
+        { key: 'accepted', label: 'Approved', tone: 'bg-sky-500' },
+        { key: 'allocated', label: 'Allocated', tone: 'bg-cyan-500' },
         { key: 'dispatched', label: 'Dispatched', tone: 'bg-indigo-500' },
         { key: 'delivered', label: 'Delivered', tone: 'bg-emerald-500' },
         { key: 'rejected', label: 'Rejected', tone: 'bg-rose-500' },

@@ -1,7 +1,7 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import { Head, Link, router } from '@inertiajs/vue3';
-import { ArrowUturnLeftIcon, ArrowLeftIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/vue/24/outline';
+import { ArrowUturnLeftIcon, ArrowLeftIcon, CheckCircleIcon, XCircleIcon, PrinterIcon } from '@heroicons/vue/24/outline';
 
 const props = defineProps({
     purchaseReturn: Object,
@@ -37,6 +37,11 @@ function cancel() {
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
+                    <a :href="route('admin.purchase-returns.print', purchaseReturn.id)" target="_blank"
+                       class="inline-flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-gray-700 px-4 py-2 text-sm font-semibold text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600 transition-all">
+                        <PrinterIcon class="h-5 w-5" /> Print A4
+                    </a>
+
                     <span v-if="purchaseReturn.status === 'draft'" class="rounded-full bg-amber-100 text-amber-800 px-3 py-1 font-semibold text-sm">DRAFT</span>
                     <span v-if="purchaseReturn.status === 'approved'" class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-1 font-semibold text-sm">APPROVED</span>
                     <span v-if="purchaseReturn.status === 'cancelled'" class="rounded-full bg-gray-100 text-gray-800 px-3 py-1 font-semibold text-sm">CANCELLED</span>

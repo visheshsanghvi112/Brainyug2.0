@@ -8,20 +8,34 @@ const props = defineProps({
     suppliers: Array,
     invoices: Array,
     products: Array,
+    prefillInvoice: Object,
 });
 
+const prefillItems = props.prefillInvoice?.items?.length
+    ? props.prefillInvoice.items.map((item) => ({
+        product_id: item.product_id || '',
+        batch_no: item.batch_no || '',
+        expiry_date: item.expiry_date || '',
+        qty: Number(item.qty || 0),
+        max_qty: Number(item.max_qty || item.qty || 0),
+        rate: Number(item.rate || 0),
+        gst_percent: Number(item.gst_percent || 0),
+        reason: item.reason || '',
+    }))
+    : null;
+
 const form = useForm({
-    supplier_id: '',
-    purchase_invoice_id: '',
+    supplier_id: props.prefillInvoice?.supplier_id || '',
+    purchase_invoice_id: props.prefillInvoice?.id || '',
     return_date: new Date().toISOString().split('T')[0],
     reason: '',
-    items: [
-        { product_id: '', batch_no: '', expiry_date: '', qty: 1, rate: 0, gst_percent: 0, reason: '' }
+    items: prefillItems || [
+        { product_id: '', batch_no: '', expiry_date: '', qty: 1, max_qty: null, rate: 0, gst_percent: 0, reason: '' }
     ],
 });
 
 function addItem() {
-    form.items.push({ product_id: '', batch_no: '', expiry_date: '', qty: 1, rate: 0, gst_percent: 0, reason: '' });
+    form.items.push({ product_id: '', batch_no: '', expiry_date: '', qty: 1, max_qty: null, rate: 0, gst_percent: 0, reason: '' });
 }
 
 function removeItem(index) {
@@ -55,18 +69,23 @@ function submit() {
         <div class="py-6">
             <div class="mx-auto max-w-7xl sm:px-6 lg:px-8">
                 <form @submit.prevent="submit" class="space-y-6">
+                    <div v-if="prefillInvoice" class="rounded-xl border border-indigo-200 bg-indigo-50 px-5 py-4 text-sm text-indigo-900 dark:border-indigo-900/50 dark:bg-indigo-900/20 dark:text-indigo-100">
+                        Return is prefilled from invoice <span class="font-semibold">{{ prefillInvoice.invoice_number }}</span> for {{ prefillInvoice.supplier_name }}.
+                        Line quantities are loaded with the currently returnable balance and can be reduced before saving.
+                    </div>
+
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-gray-200 dark:bg-gray-800 dark:ring-gray-700">
                         <div class="grid grid-cols-1 gap-5 sm:grid-cols-4">
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Supplier *</label>
-                                <select v-model="form.supplier_id" required class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white">
+                                <select v-model="form.supplier_id" :disabled="!!prefillInvoice" required class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white disabled:opacity-70">
                                     <option value="">Select...</option>
                                     <option v-for="s in suppliers" :key="s.id" :value="s.id">{{ s.name }}</option>
                                 </select>
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Link to Invoice</label>
-                                <select v-model="form.purchase_invoice_id" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white">
+                                <select v-model="form.purchase_invoice_id" :disabled="!!prefillInvoice" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white disabled:opacity-70">
                                     <option value="">No specific invoice</option>
                                     <option v-for="inv in invoices" :key="inv.id" :value="inv.id">{{ inv.invoice_number }}</option>
                                 </select>
@@ -103,25 +122,26 @@ function submit() {
                             <tbody class="divide-y divide-gray-100 dark:divide-gray-700/50">
                                 <tr v-for="(item, index) in form.items" :key="index">
                                     <td class="p-3">
-                                        <select v-model="item.product_id" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1">
+                                        <select v-model="item.product_id" :disabled="!!prefillInvoice" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1 disabled:opacity-70">
                                             <option value="">Select...</option>
                                             <option v-for="p in products" :key="p.id" :value="p.id">{{ p.product_name }}</option>
                                         </select>
                                     </td>
                                     <td class="p-3">
                                         <div class="flex flex-col gap-1">
-                                            <input v-model="item.batch_no" placeholder="Batch No *" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1" />
-                                            <input v-model="item.expiry_date" type="date" title="Expiry Date" class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1" />
+                                            <input v-model="item.batch_no" :readonly="!!prefillInvoice" placeholder="Batch No *" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1 readonly:opacity-70" />
+                                            <input v-model="item.expiry_date" :readonly="!!prefillInvoice" type="date" title="Expiry Date" class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1 readonly:opacity-70" />
                                         </div>
                                     </td>
                                     <td class="p-3">
-                                        <input v-model.number="item.qty" type="number" min="0.1" step="0.1" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1" />
+                                        <input v-model.number="item.qty" type="number" min="0.1" :max="item.max_qty || null" step="0.1" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1" />
+                                        <div v-if="item.max_qty" class="mt-1 text-[11px] text-gray-500">Max returnable: {{ item.max_qty }}</div>
                                     </td>
                                     <td class="p-3">
-                                        <input v-model.number="item.rate" type="number" min="0" step="0.01" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1" />
+                                        <input v-model.number="item.rate" :readonly="!!prefillInvoice" type="number" min="0" step="0.01" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1 readonly:opacity-70" />
                                     </td>
                                     <td class="p-3">
-                                        <input v-model.number="item.gst_percent" type="number" min="0" step="0.1" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1" />
+                                        <input v-model.number="item.gst_percent" :readonly="!!prefillInvoice" type="number" min="0" step="0.1" required class="w-full text-sm rounded border-gray-300 dark:border-gray-600 dark:bg-gray-900 p-1 readonly:opacity-70" />
                                     </td>
                                     <td class="p-3 text-center">
                                          <button v-if="form.items.length > 1" type="button" @click="removeItem(index)" class="text-red-500 hover:text-red-700 p-1">

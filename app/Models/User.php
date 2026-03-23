@@ -288,6 +288,6 @@ class User extends Authenticatable
 
         // Check if staff at a franchisee
         $staffPos = $this->staffPositions()->where('is_active', true)->first();
-        return $staffPos?->franchisee_id;
+        return $staffPos ? $staffPos->franchisee_id : null;
     }
 }

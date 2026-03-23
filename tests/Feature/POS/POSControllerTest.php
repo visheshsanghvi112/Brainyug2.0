@@ -206,6 +206,125 @@ class POSControllerTest extends TestCase
         ]);
     }
 
+    public function test_checkout_rejects_when_payment_split_does_not_match_computed_total(): void
+    {
+        $this->withoutMiddleware([
+            EnsureTwoFactorIsVerified::class,
+            EnsurePasswordResetCompleted::class,
+        ]);
+
+        $user = $this->makeFranchiseUser();
+        $support = $this->createSupportRecords();
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Mismatch Product',
+            'sku' => 'MIS-001',
+            'ptr' => 82,
+            'pts' => 79,
+            'mrp' => 100,
+            'sgst' => 0,
+            'cgst' => 0,
+            'igst' => 0,
+        ]);
+
+        InventoryLedger::create([
+            'product_id' => $product->id,
+            'batch_no' => 'MIS-BATCH-1',
+            'expiry_date' => now()->addMonths(9),
+            'mrp' => 100,
+            'location_type' => 'franchisee',
+            'location_id' => $user->franchisee_id,
+            'transaction_type' => 'RECEIVE',
+            'reference_type' => 'seed',
+            'reference_id' => 2,
+            'qty_in' => 10,
+            'qty_out' => 0,
+            'rate' => 82,
+        ]);
+
+        $response = $this->actingAs($user)->postJson(route('pos.checkout'), [
+            'bill_no' => 'POS-MIS-001',
+            'items' => [[
+                'product_id' => $product->id,
+                'batch_no' => 'MIS-BATCH-1',
+                'expiry_date' => now()->addMonths(9)->format('Y-m-d'),
+                'mrp' => 100,
+                'rate' => 82,
+                'qty' => 2,
+                'free_qty' => 0,
+                'discount_percent' => 0,
+            ]],
+            'payment_mode' => 'cash',
+            'cash_amount' => 100,
+            'bank_amount' => 0,
+            'credit_amount' => 0,
+            'transaction_no' => null,
+            'wallet_type' => null,
+            'sub_total' => 0,
+            'total_discount_amount' => 0,
+            'total_tax_amount' => 0,
+            'other_charges' => 0,
+            'total_amount' => 0,
+        ]);
+
+        $response->assertStatus(422);
+        $this->assertDatabaseMissing('sales_invoices', [
+            'bill_no' => 'POS-MIS-001',
+        ]);
+    }
+
+    public function test_checkout_rejects_when_no_stock_exists_for_requested_batch(): void
+    {
+        $this->withoutMiddleware([
+            EnsureTwoFactorIsVerified::class,
+            EnsurePasswordResetCompleted::class,
+        ]);
+
+        $user = $this->makeFranchiseUser();
+        $support = $this->createSupportRecords();
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'No Stock Product',
+            'sku' => 'NST-001',
+            'ptr' => 82,
+            'pts' => 79,
+            'mrp' => 100,
+            'sgst' => 0,
+            'cgst' => 0,
+            'igst' => 0,
+        ]);
+
+        $response = $this->actingAs($user)->postJson(route('pos.checkout'), [
+            'bill_no' => 'POS-NOSTOCK-001',
+            'items' => [[
+                'product_id' => $product->id,
+                'batch_no' => 'NO-STOCK-BATCH',
+                'expiry_date' => now()->addMonths(9)->format('Y-m-d'),
+                'mrp' => 100,
+                'rate' => 82,
+                'qty' => 1,
+                'free_qty' => 0,
+                'discount_percent' => 0,
+            ]],
+            'payment_mode' => 'cash',
+            'cash_amount' => 92,
+            'bank_amount' => 0,
+            'credit_amount' => 0,
+            'transaction_no' => null,
+            'wallet_type' => null,
+            'sub_total' => 0,
+            'total_discount_amount' => 0,
+            'total_tax_amount' => 0,
+            'other_charges' => 0,
+            'total_amount' => 0,
+        ]);
+
+        $response->assertStatus(422);
+        $this->assertDatabaseMissing('sales_invoices', [
+            'bill_no' => 'POS-NOSTOCK-001',
+        ]);
+    }
+
     private function makeFranchiseUser(): User
     {
         Permission::create(['name' => 'module.pos.view']);

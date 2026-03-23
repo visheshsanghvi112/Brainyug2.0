@@ -1,6 +1,7 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import { Head, Link, router } from '@inertiajs/vue3';
+import axios from 'axios';
 import { PrinterIcon, ArrowLeftIcon, XCircleIcon } from '@heroicons/vue/24/outline';
 
 const props = defineProps({ invoice: Object });
@@ -9,9 +10,54 @@ function fmt(val) {
     return Number(val || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
 }
 
-function cancelBill() {
+async function cancelBill() {
     if (!confirm(`Cancel bill ${props.invoice.bill_no}? This cannot be undone.`)) return;
-    router.post(route('pos.invoices.cancel', props.invoice.id));
+
+    const supervisorUsername = String(window.prompt('Supervisor username for cancellation approval:', '') || '').trim();
+    if (!supervisorUsername) return;
+
+    const supervisorPassword = String(window.prompt('Supervisor password:', '') || '');
+    if (!supervisorPassword) return;
+
+    const overrideReason = String(window.prompt('Reason for invoice cancellation:', `Cancel bill ${props.invoice.bill_no}`) || '').trim();
+    if (overrideReason.length < 5) {
+        alert('Reason must be at least 5 characters for supervisor approval.');
+        return;
+    }
+
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const snapshot = {
+        item_count: Number(props.invoice?.items?.length || 0),
+        max_line_discount: 0,
+        bill_discount_percent: 0,
+        total_amount: Number(props.invoice?.total_amount || 0),
+    };
+
+    try {
+        const authRes = await axios.post(route('pos.override.authorize'), {
+            action: 'cancel_invoice_override',
+            request_id: requestId,
+            reason: overrideReason,
+            supervisor_username: supervisorUsername,
+            supervisor_password: supervisorPassword,
+            approval_snapshot: snapshot,
+        });
+
+        const token = String(authRes?.data?.token || '');
+        if (!token) {
+            alert('Supervisor approval token missing. Please retry.');
+            return;
+        }
+
+        router.post(route('pos.invoices.cancel', props.invoice.id), {
+            override_request_id: requestId,
+            override_token: token,
+            override_reason: overrideReason,
+            override_snapshot: snapshot,
+        });
+    } catch (e) {
+        alert(e?.response?.data?.message || 'Unable to authorize cancellation right now.');
+    }
 }
 </script>
 

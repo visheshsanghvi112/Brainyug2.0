@@ -25,9 +25,9 @@ class OperationalController extends Controller
         // If Super Admin or Territory Head, fetch meetings they created, or are attending.
         // For simplicity, fetch meetings they are attending OR created.
         $meetings = Meeting::with('attendees.user:id,name,email')
-            ->where(function($query) use ($user) {
+            ->where(function (\Illuminate\Database\Eloquent\Builder $query) use ($user) {
                 $query->where('created_by', $user->id)
-                      ->orWhereHas('attendees', function($q) use ($user) {
+                      ->orWhereHas('attendees', function (\Illuminate\Database\Eloquent\Builder $q) use ($user) {
                           $q->where('user_id', $user->id);
                       });
             })

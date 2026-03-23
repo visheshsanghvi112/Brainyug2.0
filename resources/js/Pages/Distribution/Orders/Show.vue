@@ -22,6 +22,7 @@ const props = defineProps({
     order: Object,
     orderLock: Object,
     paymentSummary: Object,
+    workflowLabels: Object,
     canReviewBills: Boolean,
     canReorderRejectedOrder: Boolean,
     canSubmitPayment: Boolean,
@@ -32,19 +33,27 @@ const props = defineProps({
 const acceptForm = useForm({
     items: props.order.items.map(i => ({
         id: i.id,
-        batch_no: i.batch_no || '',
         available_batches: i.available_batches || [],
-        
-        // Editable fields
-        approved_qty: Number(i.request_qty),
+        approved_qty: Number(i.approved_qty ?? i.request_qty),
         free_qty: Number(i.free_qty || 0),
         rate: Number(i.rate || 0),
         discount_percent: Number(i.discount_percent || 0),
         gst_percent: Number(i.gst_percent || 0),
-        
         product_name: i.product?.product_name,
         sku: i.product?.sku
     }))
+});
+
+const allocationForm = useForm({
+    items: props.order.items.map(i => ({
+        id: i.id,
+        batch_no: i.batch_no || '',
+        available_batches: i.available_batches || [],
+        approved_qty: Number(i.approved_qty || 0),
+        free_qty: Number(i.free_qty || 0),
+        product_name: i.product?.product_name,
+        sku: i.product?.sku,
+    })),
 });
 
 const dispatchForm = useForm({
@@ -69,6 +78,7 @@ const paymentForm = useForm({
 });
 
 const isAccepting = ref(false);
+const isAllocating = ref(false);
 const isDispatching = ref(false);
 const isRejecting = ref(false);
 const showCalculator = ref(false);
@@ -79,8 +89,20 @@ const canUnlockOrder = computed(() => Boolean(props.orderLock?.can_force_unlock 
 
 const canShowPaymentForm = computed(() => props.canSubmitPayment && Number(props.paymentSummary?.available_to_submit || 0) > 0);
 
+const timelineEntries = computed(() => {
+    return (props.order.status_logs || []).map((entry) => ({
+        id: entry.id,
+        fromLabel: entry.from_status ? (props.workflowLabels?.labels?.[entry.from_status] || entry.from_status) : 'Draft',
+        toLabel: props.workflowLabels?.labels?.[entry.to_status] || entry.to_status,
+        note: entry.note,
+        actorName: entry.actor?.name || 'System',
+        createdAt: entry.created_at,
+    }));
+});
+
 const rowRequiredQty = (item) => Number(item.approved_qty || 0) + Number(item.free_qty || 0);
 const rowNeedsBatch = (item) => rowRequiredQty(item) > 0;
+const totalBatchStock = (item) => (item.available_batches || []).reduce((total, batch) => total + Number(batch.stock || 0), 0);
 
 const unlockOrder = () => {
     router.post(route('admin.dist-orders.unlock', props.order.id), {}, {
@@ -104,7 +126,6 @@ const handleAccept = () => {
 
             return {
                 id: item.id,
-                batch_no: requiredQty > 0 ? (item.batch_no || '') : null,
                 approved_qty: approvedQty,
                 free_qty: freeQty,
                 rate: Number(item.rate || 0),
@@ -118,6 +139,24 @@ const handleAccept = () => {
         onFinish: () => {
             acceptForm.transform((data) => data);
             isAccepting.value = false;
+        }
+    });
+};
+
+const handleAllocate = () => {
+    isAllocating.value = true;
+    allocationForm.transform((data) => ({
+        items: data.items.map((item) => ({
+            id: item.id,
+            batch_no: rowNeedsBatch(item) ? (item.batch_no || '') : null,
+        })),
+    }));
+
+    allocationForm.post(route('admin.dist-orders.allocate', props.order.id), {
+        preserveScroll: true,
+        onFinish: () => {
+            allocationForm.transform((data) => data);
+            isAllocating.value = false;
         }
     });
 };
@@ -191,16 +230,15 @@ const reorderToCart = () => {
 
 // Auto Allocate Batch (FIFO logic based on available_batches)
 const autoAllocateBatches = () => {
-    acceptForm.items.forEach(item => {
+    allocationForm.items.forEach(item => {
         if (!item.batch_no && item.available_batches && item.available_batches.length > 0) {
-            // Find a batch that has enough stock
             const reqQty = Number(item.approved_qty) + Number(item.free_qty);
             if (reqQty <= 0) {
                 return;
             }
 
             const suitableBatch = item.available_batches.find(b => Number(b.stock) >= reqQty)
-                                 || item.available_batches[0]; // fallback to oldest batch
+                                 || item.available_batches[0];
             if (suitableBatch) {
                 item.batch_no = suitableBatch.batch_no;
             }
@@ -376,6 +414,7 @@ const evaluateCalculatorExpression = (expression) => {
 const statusColors = {
     pending: 'bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400 dark:border-yellow-700',
     accepted: 'bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-700',
+    allocated: 'bg-cyan-100 text-cyan-800 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-300 dark:border-cyan-700',
     dispatched: 'bg-indigo-100 text-indigo-800 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-700',
     delivered: 'bg-green-100 text-green-800 border-green-200 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700',
     rejected: 'bg-red-100 text-red-800 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-700',
@@ -451,10 +490,34 @@ const statusColors = {
 
                     <div class="bg-white dark:bg-gray-800 shadow-sm rounded-xl p-6 border border-gray-100 dark:border-gray-700">
                         <div class="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-2">Timeline Journey</div>
-                        <div class="space-y-1.5 mt-3">
-                            <div class="text-sm flex justify-between"><span class="text-gray-500">Created:</span> <span class="font-medium dark:text-gray-200">{{ formatDate(order.created_at) }}</span></div>
-                            <div v-if="order.accepted_at" class="text-sm flex justify-between"><span class="text-blue-500">Accepted:</span> <span class="font-medium dark:text-gray-200">{{ formatDate(order.accepted_at) }}</span></div>
-                            <div v-if="order.dispatched_at" class="text-sm flex justify-between"><span class="text-indigo-500">Dispatched:</span> <span class="font-medium dark:text-gray-200">{{ formatDate(order.dispatched_at) }}</span></div>
+                        <div class="space-y-3 mt-3">
+                            <div
+                                v-for="entry in timelineEntries"
+                                :key="entry.id"
+                                class="rounded-lg border border-gray-100 dark:border-gray-700 px-3 py-2"
+                            >
+                                <div class="flex items-start justify-between gap-3">
+                                    <div class="min-w-0">
+                                        <div class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                                            <span class="text-gray-500 dark:text-gray-400">{{ entry.fromLabel }}</span>
+                                            <span class="mx-1 text-gray-400">→</span>
+                                            <span>{{ entry.toLabel }}</span>
+                                        </div>
+                                        <div class="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mt-1">
+                                            {{ entry.actorName }}
+                                        </div>
+                                        <div v-if="entry.note" class="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
+                                            {{ entry.note }}
+                                        </div>
+                                    </div>
+                                    <div class="text-[11px] text-right text-gray-500 dark:text-gray-400 shrink-0">
+                                        {{ formatDate(entry.createdAt) }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div v-if="!timelineEntries.length" class="text-sm text-gray-400 italic">
+                                Workflow history will appear here after the order starts moving.
+                            </div>
                         </div>
                     </div>
 
@@ -509,7 +572,7 @@ const statusColors = {
                     </button>
                 </div>
 
-                <div v-if="order.status !== 'pending'" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-emerald-200 dark:border-emerald-900/40">
+                <div v-if="order.status === 'dispatched' || order.status === 'delivered'" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-emerald-200 dark:border-emerald-900/40">
                     <div class="p-6 bg-gradient-to-r from-emerald-50 to-white dark:from-emerald-900/20 dark:to-gray-800 border-b border-emerald-100 dark:border-gray-700">
                         <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                             <div>
@@ -640,16 +703,16 @@ const statusColors = {
                     </div>
                 </div>
 
-                <!-- Step 1: HO Batch Allocation & Live Editor -->
+                <!-- Step 1: Commercial Review -->
                 <div v-if="order.status === 'pending'" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-indigo-200 dark:border-indigo-900/50">
                     <div class="p-5 bg-gradient-to-r from-indigo-50 to-white dark:from-indigo-900/20 dark:to-gray-800 border-b border-indigo-100 dark:border-gray-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                         <div>
-                            <h3 class="text-lg font-extrabold text-indigo-900 dark:text-indigo-300 border-l-4 border-indigo-500 pl-3">Step 1: Batch Allocation & Live Billing</h3>
-                            <p class="text-sm text-indigo-700 dark:text-gray-400 mt-1 pl-4">Live-edit quantities, discounts, and PTR. GST calculates dynamically. Select warehouse batches to reserve stock.</p>
+                            <h3 class="text-lg font-extrabold text-indigo-900 dark:text-indigo-300 border-l-4 border-indigo-500 pl-3">Step 1: Commercial Review & Billing</h3>
+                            <p class="text-sm text-indigo-700 dark:text-gray-400 mt-1 pl-4">Review requested quantities, finalize approved/free units, PTR, and discount. Warehouse batches are assigned in the next step after this approval is locked.</p>
                         </div>
-                        <button v-if="props.canReviewBills" type="button" @click="autoAllocateBatches" class="flex items-center gap-2 px-4 py-2 bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900/50 dark:text-indigo-300 font-bold rounded-lg text-sm transition-colors shadow-sm">
-                            <BoltIcon class="w-4 h-4" /> Auto-Allocate Batches
-                        </button>
+                        <div class="rounded-lg border border-indigo-200 bg-white/70 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/20 dark:text-indigo-300">
+                            Step 2 will lock batches
+                        </div>
                     </div>
 
                     <div v-if="!props.canReviewBills" class="mx-6 mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
@@ -663,7 +726,7 @@ const statusColors = {
                                 <thead class="bg-gray-50 dark:bg-gray-900/50">
                                     <tr>
                                         <th scope="col" class="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Product ID</th>
-                                        <th scope="col" class="px-4 py-3 text-center text-xs font-bold bg-indigo-50/50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 uppercase tracking-wider w-48">Select Batch</th>
+                                        <th scope="col" class="px-4 py-3 text-center text-xs font-bold bg-indigo-50/50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 uppercase tracking-wider w-48">Allocation Stage</th>
                                         <th scope="col" class="px-3 py-3 text-right text-xs font-bold text-gray-500 uppercase tracking-wider w-24">Req Qty</th>
                                         <th scope="col" class="px-3 py-3 text-right text-xs font-bold text-gray-500 uppercase tracking-wider w-24">Stock</th>
                                         <th scope="col" class="px-3 py-3 text-right text-xs font-bold text-indigo-600 uppercase tracking-wider w-24">Appd Qty</th>
@@ -681,30 +744,16 @@ const statusColors = {
                                             <div class="text-sm font-bold text-gray-900 dark:text-gray-100 leading-tight">{{ item.product_name }}</div>
                                             <div class="text-xs text-gray-400 font-mono mt-1 mb-1">{{ item.sku }}</div>
                                             
-                                            <!-- Stock Warning -->
-                                            <div v-if="item.batch_no" class="mt-1">
-                                                <span v-for="b in item.available_batches" :key="b.batch_no">
-                                                    <div v-if="b.batch_no === item.batch_no" class="flex items-center gap-1 text-[11px] font-bold" 
-                                                        :class="(Number(b.stock) < (Number(item.approved_qty) + Number(item.free_qty))) ? 'text-red-600 bg-red-50 dark:bg-red-900/30 px-2 py-0.5 rounded' : 'text-green-600'">
-                                                        <ExclamationTriangleIcon v-if="(Number(b.stock) < (Number(item.approved_qty) + Number(item.free_qty)))" class="w-3 h-3" />
-                                                        HO Stock: {{ b.stock }}
-                                                    </div>
-                                                </span>
+                                            <div class="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                                                Allocation happens after approval lock-in.
                                             </div>
                                         </td>
                                         
-                                        <!-- BATCH SELECTION -->
+                                        <!-- ALLOCATION INFO -->
                                         <td class="px-4 py-3 bg-indigo-50/20 dark:bg-indigo-900/10 align-top">
-                                            <select 
-                                                v-model="acceptForm.items[index].batch_no" 
-                                                class="block w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm font-bold text-indigo-900 dark:text-indigo-300 shadow-sm"
-                                                :required="rowNeedsBatch(acceptForm.items[index])"
-                                            >
-                                                <option value="">Select Batch</option>
-                                                <option v-for="batch in item.available_batches" :key="batch.batch_no" :value="batch.batch_no">
-                                                    {{ batch.batch_no }} ({{ batch.stock }})
-                                                </option>
-                                            </select>
+                                            <div class="rounded-lg border border-dashed border-indigo-200 bg-white/70 px-3 py-3 text-center text-xs font-semibold text-indigo-700 dark:border-indigo-800 dark:bg-gray-800/60 dark:text-indigo-300">
+                                                Batch assignment opens after commercial approval.
+                                            </div>
                                         </td>
 
                                         <!-- REQ QTY -->
@@ -715,7 +764,7 @@ const statusColors = {
                                         <!-- TOTAL STOCK FOR ITEM -->
                                         <td class="px-3 py-3 text-right align-top pt-5">
                                             <span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-bold text-gray-600 dark:bg-gray-700 dark:text-gray-300">
-                                                {{ item.available_batches.reduce((total, b) => total + Number(b.stock), 0) }}
+                                                {{ totalBatchStock(item) }}
                                             </span>
                                         </td>
 
@@ -790,7 +839,7 @@ const statusColors = {
                                 class="inline-flex justify-center items-center py-3 px-8 border border-transparent shadow-lg text-sm font-black rounded-lg text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transform hover:-translate-y-0.5 transition-all text-shadow"
                             >
                                 <CheckCircleIcon class="w-5 h-5 mr-2" />
-                                ACCEPT & LOCK ORDER: {{ formatCurrency(liveTotals.totalAmount) }}
+                                APPROVE COMMERCIAL REVIEW: {{ formatCurrency(liveTotals.totalAmount) }}
                             </button>
                         </div>
                         </fieldset>
@@ -814,11 +863,85 @@ const statusColors = {
                     </div>
                 </div>
 
-                <!-- Step 2: Distribution & Tracking (Only when Accepted) -->
-                <div v-if="order.status === 'accepted' && props.canReviewBills" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-green-200 dark:border-green-900/50">
+                <!-- Step 2: Batch Allocation -->
+                <div v-if="order.status === 'accepted' && props.canReviewBills" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-cyan-200 dark:border-cyan-900/50">
+                    <div class="p-6 bg-gradient-to-r from-cyan-50 to-white dark:from-cyan-900/20 dark:to-gray-800 border-b border-cyan-100 dark:border-gray-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                        <div>
+                            <h3 class="text-lg font-extrabold text-cyan-900 dark:text-cyan-300 border-l-4 border-cyan-500 pl-3">Step 2: Warehouse Batch Allocation</h3>
+                            <p class="text-sm text-cyan-700 dark:text-gray-400 mt-1 pl-4">Commercial approval is complete. Assign exact batches for each approved line before logistics can start.</p>
+                        </div>
+                        <button type="button" @click="autoAllocateBatches" class="flex items-center gap-2 px-4 py-2 bg-cyan-100 text-cyan-700 hover:bg-cyan-200 dark:bg-cyan-900/50 dark:text-cyan-300 font-bold rounded-lg text-sm transition-colors shadow-sm">
+                            <BoltIcon class="w-4 h-4" /> Auto-Allocate
+                        </button>
+                    </div>
+
+                    <form @submit.prevent="handleAllocate" class="p-0">
+                        <fieldset :disabled="isOrderLockedByAnother" class="disabled:opacity-60 disabled:cursor-not-allowed">
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                                    <thead class="bg-cyan-50/60 dark:bg-cyan-900/10">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-gray-500">Product</th>
+                                            <th class="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-gray-500">Approved</th>
+                                            <th class="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-green-600">Free</th>
+                                            <th class="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-cyan-700">Total Need</th>
+                                            <th class="px-4 py-3 text-center text-xs font-bold uppercase tracking-wider text-cyan-700">Select Batch</th>
+                                            <th class="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-gray-500">HO Stock</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-100 dark:divide-gray-700">
+                                        <tr v-for="(item, index) in allocationForm.items" :key="item.id" class="hover:bg-gray-50 dark:hover:bg-gray-700/40 transition-colors">
+                                            <td class="px-4 py-3 align-top">
+                                                <div class="text-sm font-bold text-gray-900 dark:text-white">{{ item.product_name }}</div>
+                                                <div class="text-xs text-gray-500 mt-1 font-mono">{{ item.sku }}</div>
+                                            </td>
+                                            <td class="px-3 py-3 text-right align-top pt-4 text-sm font-bold text-gray-900 dark:text-white">{{ item.approved_qty }}</td>
+                                            <td class="px-3 py-3 text-right align-top pt-4 text-sm font-bold text-green-600 dark:text-green-400">{{ item.free_qty }}</td>
+                                            <td class="px-3 py-3 text-right align-top pt-4 text-sm font-black text-cyan-700 dark:text-cyan-300">{{ rowRequiredQty(item) }}</td>
+                                            <td class="px-4 py-3 align-top">
+                                                <select
+                                                    v-model="allocationForm.items[index].batch_no"
+                                                    class="block w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 rounded-lg focus:ring-cyan-500 focus:border-cyan-500 sm:text-sm font-bold text-cyan-900 dark:text-cyan-300 shadow-sm"
+                                                    :required="rowNeedsBatch(item)"
+                                                >
+                                                    <option value="">Select Batch</option>
+                                                    <option v-for="batch in item.available_batches" :key="batch.batch_no" :value="batch.batch_no">
+                                                        {{ batch.batch_no }} ({{ batch.stock }})
+                                                    </option>
+                                                </select>
+                                                <div v-if="item.batch_no" class="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                                                    Selected batch will be used during dispatch.
+                                                </div>
+                                            </td>
+                                            <td class="px-3 py-3 text-right align-top pt-4">
+                                                <span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-bold text-gray-600 dark:bg-gray-700 dark:text-gray-300">
+                                                    {{ totalBatchStock(item) }}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div class="px-6 py-5 bg-cyan-50/50 dark:bg-cyan-900/10 border-t border-cyan-100 dark:border-cyan-900/40 flex justify-end">
+                                <button
+                                    type="submit"
+                                    :disabled="allocationForm.processing"
+                                    class="inline-flex justify-center items-center py-3 px-8 border border-transparent shadow-lg text-sm font-black rounded-lg text-white bg-cyan-600 hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-cyan-500 transform hover:-translate-y-0.5 transition-all"
+                                >
+                                    <CheckCircleIcon class="w-5 h-5 mr-2" />
+                                    LOCK ALLOCATION & OPEN DISPATCH
+                                </button>
+                            </div>
+                        </fieldset>
+                    </form>
+                </div>
+
+                <!-- Step 3: Dispatch Logistics -->
+                <div v-if="order.status === 'allocated' && props.canReviewBills" class="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden border border-green-200 dark:border-green-900/50">
                     <div class="p-6 bg-gradient-to-r from-green-50 to-white dark:from-green-900/20 dark:to-gray-800 border-b border-green-100 dark:border-gray-700">
-                        <h3 class="text-lg font-extrabold text-green-900 dark:text-green-400 border-l-4 border-green-500 pl-3">Step 2: Dispatch Logistics</h3>
-                        <p class="text-sm text-green-700 dark:text-gray-400 mt-1 pl-4">The order is billed. Providing tracking info and dispatching will officially transfer inventory from HO to Franchisee Ledger.</p>
+                        <h3 class="text-lg font-extrabold text-green-900 dark:text-green-400 border-l-4 border-green-500 pl-3">Step 3: Dispatch Logistics</h3>
+                        <p class="text-sm text-green-700 dark:text-gray-400 mt-1 pl-4">Batches are locked. Provide transporter and invoice metadata to transfer HO inventory into the franchisee ledger.</p>
                     </div>
                     
                     <form @submit.prevent="handleDispatch" class="p-6">

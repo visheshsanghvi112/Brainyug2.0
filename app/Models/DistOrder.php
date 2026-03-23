@@ -52,6 +52,11 @@ class DistOrder extends Model
         return $this->hasMany(Commission::class);
     }
 
+    public function statusLogs()
+    {
+        return $this->hasMany(DistOrderStatusLog::class)->latest('created_at');
+    }
+
     public function payments()
     {
         return $this->hasMany(DistOrderPayment::class)->latest('id');

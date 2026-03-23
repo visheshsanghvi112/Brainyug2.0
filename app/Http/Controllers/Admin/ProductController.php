@@ -575,7 +575,7 @@ class ProductController extends Controller
             ->where('is_active', true)
             ->where('hide', false)
             ->where('is_banned', false)
-            ->where(function ($q) use ($term) {
+            ->where(function (\Illuminate\Database\Eloquent\Builder $q) use ($term) {
                 $q->where('product_name', 'like', "%{$term}%")
                   ->orWhere('sku', 'like', "%{$term}%")
                   ->orWhere('barcode', 'like', "%{$term}%")

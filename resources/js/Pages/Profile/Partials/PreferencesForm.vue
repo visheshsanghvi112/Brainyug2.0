@@ -29,11 +29,16 @@ const form = useForm({
     show_purchase_rate: prefs.show_purchase_rate ?? false,
     csv_format: prefs.csv_format ?? 'marg',
     receipt_layout: prefs.receipt_layout ?? 'thermal',
+    round_off_enabled: prefs.round_off_enabled ?? true,
+    round_off_mode: prefs.round_off_mode ?? 'nearest',
     auto_print_after_checkout: prefs.auto_print_after_checkout ?? true,
     auto_open_invoice_after_checkout: prefs.auto_open_invoice_after_checkout ?? true,
     auto_lock_bill_on_hold: prefs.auto_lock_bill_on_hold ?? false,
     smart_batch_suggestion: prefs.smart_batch_suggestion ?? true,
     low_stock_daily_digest: prefs.low_stock_daily_digest ?? true,
+    bill_logo_url: prefs.bill_logo_url ?? '',
+    bill_header_line_1: prefs.bill_header_line_1 ?? '',
+    bill_header_line_2: prefs.bill_header_line_2 ?? '',
 });
 
 const submit = () => {
@@ -193,6 +198,27 @@ const submit = () => {
                         <InputLabel for="print_copies" value="Print Copies" />
                         <input id="print_copies" v-model="form.print_copies" type="number" min="1" max="5" class="mt-1 block w-full rounded-md border-gray-300 py-2 px-3 text-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300" />
                     </div>
+                    <div>
+                        <InputLabel for="round_off_mode" value="Round-Off Mode" />
+                        <select id="round_off_mode" v-model="form.round_off_mode" class="mt-1 block w-full rounded-md border-gray-300 py-2 pl-3 pr-10 text-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-indigo-600">
+                            <option value="nearest">Nearest Rupee</option>
+                            <option value="up">Always Up</option>
+                            <option value="down">Always Down</option>
+                            <option value="none">No Round-Off</option>
+                        </select>
+                    </div>
+                    <div>
+                        <InputLabel for="bill_logo_url" value="Bill Logo URL (Temporary)" />
+                        <input id="bill_logo_url" v-model="form.bill_logo_url" type="text" class="mt-1 block w-full rounded-md border-gray-300 py-2 px-3 text-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300" placeholder="https://example.com/logo.png" />
+                    </div>
+                    <div>
+                        <InputLabel for="bill_header_line_1" value="Bill Header Line 1" />
+                        <input id="bill_header_line_1" v-model="form.bill_header_line_1" type="text" class="mt-1 block w-full rounded-md border-gray-300 py-2 px-3 text-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300" placeholder="Authorised Retail Franchise" />
+                    </div>
+                    <div>
+                        <InputLabel for="bill_header_line_2" value="Bill Header Line 2" />
+                        <input id="bill_header_line_2" v-model="form.bill_header_line_2" type="text" class="mt-1 block w-full rounded-md border-gray-300 py-2 px-3 text-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300" placeholder="Drug License / Support Info" />
+                    </div>
                 </div>
                 <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <label class="flex items-start rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-900">
@@ -202,6 +228,10 @@ const submit = () => {
                     <label class="flex items-start rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-900">
                         <input v-model="form.auto_print_after_checkout" type="checkbox" class="mt-1 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600 dark:border-gray-700 dark:bg-gray-900" />
                         <span class="ml-3 text-sm text-gray-700 dark:text-gray-200">Auto open print dialog after checkout</span>
+                    </label>
+                    <label class="flex items-start rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-900">
+                        <input v-model="form.round_off_enabled" type="checkbox" class="mt-1 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600 dark:border-gray-700 dark:bg-gray-900" />
+                        <span class="ml-3 text-sm text-gray-700 dark:text-gray-200">Enable invoice round-off in POS checkout</span>
                     </label>
                     <label class="flex items-start rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-900">
                         <input v-model="form.auto_cut_receipt" type="checkbox" class="mt-1 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600 dark:border-gray-700 dark:bg-gray-900" />

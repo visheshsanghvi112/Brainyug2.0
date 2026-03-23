@@ -67,6 +67,7 @@ class ReconcileLegacyPurchaseData extends Command
             'line_recovery' => [
                 'inserted' => 0,
                 'invoices_touched' => 0,
+                'failed_invoices' => 0,
                 'unresolved_product_lines' => 0,
                 'samples' => [],
             ],
@@ -94,6 +95,7 @@ class ReconcileLegacyPurchaseData extends Command
         $recovery = $this->recoverMissingItems($expectedBySource, $dryRun);
         $report['line_recovery']['inserted'] = $recovery['inserted'];
         $report['line_recovery']['invoices_touched'] = $recovery['invoices_touched'];
+        $report['line_recovery']['failed_invoices'] = $recovery['failed_invoices'];
         $report['line_recovery']['samples'] = array_slice($unresolvedSamples, 0, 200);
 
         if ($writeReport) {
@@ -106,7 +108,7 @@ class ReconcileLegacyPurchaseData extends Command
             ['Track', 'Updated/Inserted', 'Unresolved'],
             [
                 ['Supplier remap', $report['supplier_reconcile']['updated'] . ' (created ' . $report['supplier_reconcile']['created_suppliers'] . ')', $report['supplier_reconcile']['unmapped']],
-                ['Missing line recovery', $report['line_recovery']['inserted'], $report['line_recovery']['unresolved_product_lines']],
+                ['Missing line recovery', $report['line_recovery']['inserted'], $report['line_recovery']['unresolved_product_lines'] . ' (failed invoices ' . $report['line_recovery']['failed_invoices'] . ')'],
             ]
         );
 
@@ -373,7 +375,23 @@ class ReconcileLegacyPurchaseData extends Command
         }
 
         if ($dryRun) {
-            return null;
+            $syntheticSupplierId = -1 * (1000000 + $legacyId);
+
+            $createdSupplierByVendorId[$legacyId] = $syntheticSupplierId;
+            $supplierLookup['ids'][$syntheticSupplierId] = true;
+            $supplierLookup['codes'][strtoupper($code)] = $syntheticSupplierId;
+
+            $normalizedCode = $this->normalizeKey($code);
+            if ($normalizedCode !== '' && !isset($supplierLookup['normalized_codes'][$normalizedCode])) {
+                $supplierLookup['normalized_codes'][$normalizedCode] = $syntheticSupplierId;
+            }
+
+            $normalizedName = $this->normalizeKey($name);
+            if ($normalizedName !== '' && !isset($supplierLookup['normalized_names'][$normalizedName])) {
+                $supplierLookup['normalized_names'][$normalizedName] = $syntheticSupplierId;
+            }
+
+            return $syntheticSupplierId;
         }
 
         $supplierId = (int) DB::table('suppliers')->insertGetId([
@@ -546,7 +564,7 @@ class ReconcileLegacyPurchaseData extends Command
 
     private function recoverMissingItems(array $expectedBySource, bool $dryRun): array
     {
-        $stats = ['inserted' => 0, 'invoices_touched' => 0];
+        $stats = ['inserted' => 0, 'invoices_touched' => 0, 'failed_invoices' => 0];
 
         $this->info('Recovering missing legacy invoice line items...');
 
@@ -555,58 +573,94 @@ class ReconcileLegacyPurchaseData extends Command
             ->orderBy('id')
             ->chunkById(200, function ($invoices) use (&$stats, $expectedBySource, $dryRun) {
                 foreach ($invoices as $invoice) {
-                    $source = (string) ($invoice->legacy_source ?? 'ho');
-                    $challanId = (int) ($invoice->legacy_challan_id ?? 0);
-                    if ($challanId <= 0) {
-                        continue;
+                    try {
+                        DB::transaction(function () use ($invoice, $expectedBySource, $dryRun, &$stats) {
+                            $source = (string) ($invoice->legacy_source ?? 'ho');
+                            $challanId = (int) ($invoice->legacy_challan_id ?? 0);
+                            if ($challanId <= 0) {
+                                return;
+                            }
+
+                            $expectedLines = $expectedBySource[$source][$challanId] ?? [];
+                            if ($expectedLines === []) {
+                                return;
+                            }
+
+                            DB::table('purchase_invoices')
+                                ->where('id', $invoice->id)
+                                ->lockForUpdate()
+                                ->first();
+
+                            $existing = DB::table('purchase_invoice_items')
+                                ->where('purchase_invoice_id', $invoice->id)
+                                ->select('product_id', 'batch_no', 'qty', 'rate', 'discount_percent', 'gst_percent', 'free_qty')
+                                ->get();
+
+                            $existingSignatures = [];
+                            foreach ($existing as $e) {
+                                $existingSignatures[$this->lineSignature(
+                                    (int) $e->product_id,
+                                    (string) $e->batch_no,
+                                    (float) $e->qty,
+                                    (float) $e->rate,
+                                    (float) ($e->discount_percent ?? 0),
+                                    (float) ($e->gst_percent ?? 0),
+                                    (float) ($e->free_qty ?? 0)
+                                )] = true;
+                            }
+
+                            $insertRows = [];
+                            foreach ($expectedLines as $line) {
+                                $sig = $this->lineSignature(
+                                    (int) $line['product_id'],
+                                    (string) $line['batch'],
+                                    (float) $line['qty'],
+                                    (float) $line['rate'],
+                                    (float) $line['discount'],
+                                    (float) $line['gst'],
+                                    (float) $line['free']
+                                );
+                                if (isset($existingSignatures[$sig])) {
+                                    continue;
+                                }
+
+                                $insertRows[] = $this->buildLineItemRow($invoice->id, $invoice->tax_type, $line);
+                                $existingSignatures[$sig] = true;
+                            }
+
+                            if ($insertRows === []) {
+                                return;
+                            }
+
+                            if (!$dryRun) {
+                                DB::table('purchase_invoice_items')->insert($insertRows);
+                                $this->recomputeInvoiceTotals((int) $invoice->id);
+                            }
+
+                            $stats['inserted'] += count($insertRows);
+                            $stats['invoices_touched']++;
+                        });
+                    } catch (\Throwable $e) {
+                        $stats['failed_invoices']++;
+                        $this->warn('Line recovery failed for invoice #' . (int) $invoice->id . ': ' . $e->getMessage());
                     }
-
-                    $expectedLines = $expectedBySource[$source][$challanId] ?? [];
-                    if ($expectedLines === []) {
-                        continue;
-                    }
-
-                    $existing = DB::table('purchase_invoice_items')
-                        ->where('purchase_invoice_id', $invoice->id)
-                        ->select('product_id', 'batch_no', 'qty', 'rate')
-                        ->get();
-
-                    $existingSignatures = [];
-                    foreach ($existing as $e) {
-                        $existingSignatures[$this->lineSignature((int) $e->product_id, (string) $e->batch_no, (float) $e->qty, (float) $e->rate)] = true;
-                    }
-
-                    $insertRows = [];
-                    foreach ($expectedLines as $line) {
-                        $sig = $this->lineSignature((int) $line['product_id'], (string) $line['batch'], (float) $line['qty'], (float) $line['rate']);
-                        if (isset($existingSignatures[$sig])) {
-                            continue;
-                        }
-
-                        $insertRows[] = $this->buildLineItemRow($invoice->id, $invoice->tax_type, $line);
-                        $existingSignatures[$sig] = true;
-                    }
-
-                    if ($insertRows === []) {
-                        continue;
-                    }
-
-                    if (!$dryRun) {
-                        DB::table('purchase_invoice_items')->insert($insertRows);
-                        $this->recomputeInvoiceTotals((int) $invoice->id, (string) $invoice->tax_type);
-                    }
-
-                    $stats['inserted'] += count($insertRows);
-                    $stats['invoices_touched']++;
                 }
             });
 
         return $stats;
     }
 
-    private function lineSignature(int $productId, string $batchNo, float $qty, float $rate): string
+    private function lineSignature(int $productId, string $batchNo, float $qty, float $rate, float $discountPercent, float $gstPercent, float $freeQty): string
     {
-        return implode('|', [$productId, trim($batchNo), number_format($qty, 4, '.', ''), number_format($rate, 4, '.', '')]);
+        return implode('|', [
+            $productId,
+            strtoupper(trim($batchNo)),
+            number_format($qty, 4, '.', ''),
+            number_format($rate, 4, '.', ''),
+            number_format($discountPercent, 4, '.', ''),
+            number_format($gstPercent, 4, '.', ''),
+            number_format($freeQty, 4, '.', ''),
+        ]);
     }
 
     private function buildLineItemRow(int $invoiceId, string $taxType, array $line): array
@@ -640,8 +694,17 @@ class ReconcileLegacyPurchaseData extends Command
         ];
     }
 
-    private function recomputeInvoiceTotals(int $invoiceId, string $taxType): void
+    private function recomputeInvoiceTotals(int $invoiceId): void
     {
+        $invoice = DB::table('purchase_invoices')
+            ->where('id', $invoiceId)
+            ->select('tax_type', 'round_off')
+            ->first();
+
+        if (!$invoice) {
+            return;
+        }
+
         $rows = DB::table('purchase_invoice_items')
             ->where('purchase_invoice_id', $invoiceId)
             ->select('taxable_amount', 'discount_amount', 'gst_amount')
@@ -655,12 +718,14 @@ class ReconcileLegacyPurchaseData extends Command
         $cgst = 0.0;
         $igst = 0.0;
 
-        if ($taxType === 'intra_state') {
+        if ((string) $invoice->tax_type === 'intra_state') {
             $sgst = round($gstTotal / 2, 2);
             $cgst = round($gstTotal / 2, 2);
         } else {
             $igst = $gstTotal;
         }
+
+        $roundOff = round((float) ($invoice->round_off ?? 0), 2);
 
         DB::table('purchase_invoices')
             ->where('id', $invoiceId)
@@ -670,7 +735,7 @@ class ReconcileLegacyPurchaseData extends Command
                 'sgst_amount' => $sgst,
                 'cgst_amount' => $cgst,
                 'igst_amount' => $igst,
-                'total_amount' => round($subtotal + $sgst + $cgst + $igst, 2),
+                'total_amount' => round($subtotal + $sgst + $cgst + $igst + $roundOff, 2),
                 'updated_at' => now(),
             ]);
     }

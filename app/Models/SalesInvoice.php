@@ -17,6 +17,7 @@ class SalesInvoice extends Model
         'total_discount_amount' => 'decimal:2',
         'total_tax_amount' => 'decimal:2',
         'other_charges' => 'decimal:2',
+        'round_off' => 'decimal:2',
         'total_amount' => 'decimal:2',
     ];
 

@@ -35,6 +35,7 @@ class PurchaseInvoice extends Model
 
     public function supplier() { return $this->belongsTo(Supplier::class); }
     public function items() { return $this->hasMany(PurchaseInvoiceItem::class); }
+    public function purchaseReturns() { return $this->hasMany(PurchaseReturn::class); }
     public function createdBy() { return $this->belongsTo(User::class, 'created_by'); }
     public function approvedBy() { return $this->belongsTo(User::class, 'approved_by'); }
 
@@ -44,6 +45,21 @@ class PurchaseInvoice extends Model
 
         /** Returns true if this invoice is a read-only legacy archive record. */
         public function isLegacy(): bool { return $this->status === 'legacy'; }
+
+    public function canEdit(): bool
+    {
+        return $this->status === 'draft';
+    }
+
+    public function canApprove(): bool
+    {
+        return $this->status === 'draft';
+    }
+
+    public function canCancel(): bool
+    {
+        return in_array($this->status, ['draft', 'approved'], true);
+    }
 
     /**
      * Get current financial year string (Apr-Mar).

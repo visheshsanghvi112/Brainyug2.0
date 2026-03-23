@@ -80,7 +80,7 @@ class ReportController extends Controller
 
         // Apply robust scoping
         if ($allowedIds !== null) {
-            $query->where(function ($q) use ($allowedIds) {
+            $query->where(function (\Illuminate\Database\Query\Builder $q) use ($allowedIds) {
                 $q->where('location_type', 'franchisee')
                   ->whereIn('location_id', $allowedIds);
                 // Non-admins cannot see warehouse stock here unless they are distributors, which return null above.
@@ -247,7 +247,7 @@ class ReportController extends Controller
             ->having('current_stock', '>', 0);
 
         if ($allowedIds !== null) {
-            $query->where(function($q) use ($allowedIds) {
+            $query->where(function (\Illuminate\Database\Query\Builder $q) use ($allowedIds) {
                 $q->where('location_type', 'franchisee')
                   ->whereIn('location_id', $allowedIds);
             });
@@ -639,6 +639,7 @@ class ReportController extends Controller
                 ->selectRaw("COALESCE(SUM(CASE WHEN pi.tax_type = 'inter_state' THEN pit.gst_amount ELSE 0 END),0) as igst_amount")
                 ->selectRaw('COALESCE(SUM(pit.gst_amount),0) as total_gst')
                 ->first();
+            /** @var object{taxable_value:mixed,cgst_amount:mixed,sgst_amount:mixed,igst_amount:mixed,total_gst:mixed}|null $purchase */
 
             $itc = [
                 'taxable_value' => round((float) $purchase->taxable_value, 2),
@@ -663,6 +664,7 @@ class ReportController extends Controller
                 ->selectRaw('COALESCE(SUM(COALESCE((' . $gstExpr . ') * (COALESCE(do.igst_amount,0) / ' . $headerTaxBase . '), 0)),0) as igst_amount')
                 ->selectRaw('COALESCE(SUM(' . $gstExpr . '),0) as total_gst')
                 ->first();
+            /** @var object{taxable_value:mixed,cgst_amount:mixed,sgst_amount:mixed,igst_amount:mixed,total_gst:mixed}|null $dispatchInward */
 
             $itc = [
                 'taxable_value' => round((float) $dispatchInward->taxable_value, 2),
@@ -973,6 +975,362 @@ class ReportController extends Controller
     }
 
     /**
+     * Franchisee-wise sales leaderboard with top and bottom performers.
+     */
+    public function franchiseeSales(Request $request)
+    {
+        $this->authorize('view reports');
+        $allowedIds = $this->getAllowedFranchiseeIds($request->user());
+
+        $days = max(7, (int) $request->input('days', 30));
+        $threshold = Carbon::now()->subDays($days)->startOfDay();
+
+        $query = DB::table('sales_invoices as si')
+            ->join('franchisees as f', 'f.id', '=', 'si.franchisee_id')
+            ->where('si.status', 'completed')
+            ->where('si.date_time', '>=', $threshold)
+            ->selectRaw('f.id, f.shop_name, f.shop_code, SUM(si.total_amount) as sales, COUNT(si.id) as bills, AVG(si.total_amount) as avg_bill')
+            ->groupBy('f.id', 'f.shop_name', 'f.shop_code');
+
+        if ($allowedIds !== null) {
+            if ($allowedIds === []) {
+                return Inertia::render('Reports/BI/FranchiseeSales', [
+                    'days' => $days,
+                    'summary' => [
+                        'total_sales' => 0,
+                        'total_bills' => 0,
+                        'active_franchisees' => 0,
+                        'average_bill' => 0,
+                    ],
+                    'topRows' => [],
+                    'bottomRows' => [],
+                ]);
+            }
+
+            $query->whereIn('si.franchisee_id', $allowedIds);
+        }
+
+        $rows = $query->get()->map(function ($row) {
+            return [
+                'id' => (int) $row->id,
+                'shop_name' => $row->shop_name,
+                'shop_code' => $row->shop_code,
+                'sales' => round((float) $row->sales, 2),
+                'bills' => (int) $row->bills,
+                'avg_bill' => round((float) $row->avg_bill, 2),
+            ];
+        });
+
+        $summary = [
+            'total_sales' => round((float) $rows->sum('sales'), 2),
+            'total_bills' => (int) $rows->sum('bills'),
+            'active_franchisees' => $rows->count(),
+            'average_bill' => round((float) ($rows->sum('sales') / max(1, $rows->sum('bills'))), 2),
+        ];
+
+        if ($format = $this->requestedExportFormat($request)) {
+            $headers = ['Franchisee', 'Shop Code', 'Sales', 'Bills', 'Average Bill', 'Band'];
+            $exportRows = $rows
+                ->sortByDesc('sales')
+                ->values()
+                ->map(fn (array $row, int $index) => [
+                    $row['shop_name'],
+                    $row['shop_code'] ?: '-',
+                    $row['sales'],
+                    $row['bills'],
+                    $row['avg_bill'],
+                    $index < 15 ? 'Top Performer' : 'Other',
+                ])
+                ->all();
+
+            $meta = [
+                'Window (Days)' => $days,
+                'Total Sales' => $summary['total_sales'],
+                'Total Bills' => $summary['total_bills'],
+                'Active Franchisees' => $summary['active_franchisees'],
+                'Average Bill' => $summary['average_bill'],
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'franchisee_sales_leaderboard',
+                    sheetTitle: 'Franchisee Sales',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'franchisee_sales_leaderboard',
+                    title: 'Franchisee Sales Leaderboard',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($headers, $exportRows) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($exportRows as $row) {
+                    fputcsv($file, (array) $row);
+                }
+                fclose($file);
+            }, 'franchisee_sales_leaderboard_' . date('Ymd_His') . '.csv');
+        }
+
+        return Inertia::render('Reports/BI/FranchiseeSales', [
+            'days' => $days,
+            'summary' => $summary,
+            'topRows' => $rows->sortByDesc('sales')->take(15)->values(),
+            'bottomRows' => $rows->sortBy('sales')->take(15)->values(),
+        ]);
+    }
+
+    /**
+     * Growth report with MoM / YoY comparisons for franchisees and products.
+     */
+    public function growth(Request $request)
+    {
+        $this->authorize('view reports');
+        $allowedIds = $this->getAllowedFranchiseeIds($request->user());
+
+        $days = max(30, (int) $request->input('days', 30));
+        $currentStart = Carbon::now()->subDays($days - 1)->startOfDay();
+        $currentEnd = Carbon::now()->endOfDay();
+        $previousStart = (clone $currentStart)->subDays($days);
+        $previousEnd = (clone $currentStart)->subSecond();
+        $yearAgoStart = (clone $currentStart)->subYear();
+        $yearAgoEnd = (clone $currentEnd)->subYear();
+        $trendStart = Carbon::now()->startOfMonth()->subMonths(11);
+
+        $invoiceWindowStart = $yearAgoStart->copy()->startOfDay();
+
+        $invoiceQuery = DB::table('sales_invoices as si')
+            ->where('si.status', 'completed')
+            ->where('si.date_time', '>=', $invoiceWindowStart)
+            ->where('si.date_time', '<=', $currentEnd);
+
+        if ($allowedIds !== null) {
+            if ($allowedIds === []) {
+                return Inertia::render('Reports/BI/Growth', [
+                    'days' => $days,
+                    'summary' => [
+                        'current_sales' => 0,
+                        'previous_sales' => 0,
+                        'year_ago_sales' => 0,
+                        'mom_delta' => 0,
+                        'yoy_delta' => 0,
+                        'mom_percent' => 0,
+                        'yoy_percent' => 0,
+                    ],
+                    'trend' => [],
+                    'franchiseGrowth' => [],
+                    'productGrowth' => [],
+                ]);
+            }
+
+            $invoiceQuery->whereIn('si.franchisee_id', $allowedIds);
+        }
+
+        $totals = (clone $invoiceQuery)
+            ->selectRaw(
+                'COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN si.total_amount ELSE 0 END), 0) as current_sales,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN si.total_amount ELSE 0 END), 0) as previous_sales,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN si.total_amount ELSE 0 END), 0) as year_ago_sales',
+                [
+                    $currentStart, $currentEnd,
+                    $previousStart, $previousEnd,
+                    $yearAgoStart, $yearAgoEnd,
+                ]
+            )
+            ->first();
+
+        $driver = DB::connection()->getDriverName();
+        $monthExpr = $driver === 'sqlite'
+            ? "strftime('%Y-%m', si.date_time)"
+            : "DATE_FORMAT(si.date_time, '%Y-%m')";
+
+        $trend = (clone $invoiceQuery)
+            ->where('si.date_time', '>=', $trendStart)
+            ->selectRaw($monthExpr . " as ym, COALESCE(SUM(si.total_amount), 0) as sales")
+            ->groupBy('ym')
+            ->orderBy('ym')
+            ->get()
+            ->map(function ($row) {
+                return [
+                    'label' => Carbon::createFromFormat('Y-m', $row->ym)->format('M Y'),
+                    'sales' => round((float) $row->sales, 2),
+                ];
+            })
+            ->values();
+
+        $franchiseGrowth = DB::table('sales_invoices as si')
+            ->join('franchisees as f', 'f.id', '=', 'si.franchisee_id')
+            ->where('si.status', 'completed')
+            ->where('si.date_time', '>=', $invoiceWindowStart)
+            ->where('si.date_time', '<=', $currentEnd)
+            ->when($allowedIds !== null, fn ($q) => $q->whereIn('si.franchisee_id', $allowedIds))
+            ->selectRaw(
+                'f.id, f.shop_name, f.shop_code,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN si.total_amount ELSE 0 END), 0) as current_sales,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN si.total_amount ELSE 0 END), 0) as previous_sales,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN si.total_amount ELSE 0 END), 0) as year_ago_sales',
+                [
+                    $currentStart, $currentEnd,
+                    $previousStart, $previousEnd,
+                    $yearAgoStart, $yearAgoEnd,
+                ]
+            )
+            ->groupBy('f.id', 'f.shop_name', 'f.shop_code')
+            ->get()
+            ->map(fn ($row) => $this->formatGrowthRow($row, 'shop_name', 'shop_code'))
+            ->sortByDesc('mom_delta')
+            ->take(12)
+            ->values();
+
+        $productGrowth = DB::table('sales_invoice_items as sii')
+            ->join('sales_invoices as si', 'si.id', '=', 'sii.sales_invoice_id')
+            ->join('products as p', 'p.id', '=', 'sii.product_id')
+            ->where('si.status', 'completed')
+            ->where('si.date_time', '>=', $invoiceWindowStart)
+            ->where('si.date_time', '<=', $currentEnd)
+            ->when($allowedIds !== null, fn ($q) => $q->whereIn('si.franchisee_id', $allowedIds))
+            ->selectRaw(
+                'p.id, p.product_name, p.sku,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN sii.taxable_amount ELSE 0 END), 0) as current_sales,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN sii.taxable_amount ELSE 0 END), 0) as previous_sales,
+                 COALESCE(SUM(CASE WHEN si.date_time BETWEEN ? AND ? THEN sii.taxable_amount ELSE 0 END), 0) as year_ago_sales',
+                [
+                    $currentStart, $currentEnd,
+                    $previousStart, $previousEnd,
+                    $yearAgoStart, $yearAgoEnd,
+                ]
+            )
+            ->groupBy('p.id', 'p.product_name', 'p.sku')
+            ->get()
+            ->map(fn ($row) => $this->formatGrowthRow($row, 'product_name', 'sku'))
+            ->sortByDesc('mom_delta')
+            ->take(12)
+            ->values();
+
+        /** @var object{current_sales:mixed,previous_sales:mixed,year_ago_sales:mixed}|null $totals */
+
+        $summary = [
+            'current_sales' => round((float) ($totals->current_sales ?? 0), 2),
+            'previous_sales' => round((float) ($totals->previous_sales ?? 0), 2),
+            'year_ago_sales' => round((float) ($totals->year_ago_sales ?? 0), 2),
+        ];
+        $summary['mom_delta'] = round($summary['current_sales'] - $summary['previous_sales'], 2);
+        $summary['yoy_delta'] = round($summary['current_sales'] - $summary['year_ago_sales'], 2);
+        $summary['mom_percent'] = $this->growthPercent($summary['current_sales'], $summary['previous_sales']);
+        $summary['yoy_percent'] = $this->growthPercent($summary['current_sales'], $summary['year_ago_sales']);
+
+        if ($format = $this->requestedExportFormat($request)) {
+            $headers = [
+                'Dimension',
+                'Label',
+                'Code',
+                'Current Sales',
+                'Previous Sales',
+                'Year Ago Sales',
+                'MoM Delta',
+                'MoM %',
+                'YoY Delta',
+                'YoY %',
+            ];
+
+            $trendRows = $trend->map(fn (array $row) => [
+                'Trend',
+                $row['label'],
+                '',
+                $row['sales'],
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+            ]);
+
+            $franchiseRows = $franchiseGrowth->map(fn (array $row) => [
+                'Franchise',
+                $row['label'],
+                $row['code'],
+                $row['current_sales'],
+                $row['previous_sales'],
+                $row['year_ago_sales'],
+                $row['mom_delta'],
+                $row['mom_percent'],
+                $row['yoy_delta'],
+                $row['yoy_percent'],
+            ]);
+
+            $productRows = $productGrowth->map(fn (array $row) => [
+                'Product',
+                $row['label'],
+                $row['code'],
+                $row['current_sales'],
+                $row['previous_sales'],
+                $row['year_ago_sales'],
+                $row['mom_delta'],
+                $row['mom_percent'],
+                $row['yoy_delta'],
+                $row['yoy_percent'],
+            ]);
+
+            $exportRows = $trendRows->concat($franchiseRows)->concat($productRows)->all();
+            $meta = [
+                'Window (Days)' => $days,
+                'Current Sales' => $summary['current_sales'],
+                'Previous Sales' => $summary['previous_sales'],
+                'Year Ago Sales' => $summary['year_ago_sales'],
+                'MoM Delta' => $summary['mom_delta'],
+                'YoY Delta' => $summary['yoy_delta'],
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'growth_report',
+                    sheetTitle: 'Growth',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'growth_report',
+                    title: 'Growth Report',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($headers, $exportRows) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($exportRows as $row) {
+                    fputcsv($file, $row);
+                }
+                fclose($file);
+            }, 'growth_report_' . date('Ymd_His') . '.csv');
+        }
+
+        return Inertia::render('Reports/BI/Growth', [
+            'days' => $days,
+            'summary' => $summary,
+            'trend' => $trend,
+            'franchiseGrowth' => $franchiseGrowth,
+            'productGrowth' => $productGrowth,
+        ]);
+    }
+
+    /**
      * Commission report — shows all commission entries with hierarchy context.
      * Admin sees all; franchisee/territory heads see their own earnings.
      */
@@ -988,17 +1346,23 @@ class ReportController extends Controller
             ->join('users as u', 'c.user_id', '=', 'u.id')
             ->leftJoin('dist_orders as d', 'c.dist_order_id', '=', 'd.id')
             ->select(
-                'c.id', 'c.type', 'c.cr_dr',
+                'c.id', 'c.type', 'c.cr_dr', 'c.trigger_event',
                 'c.base_amount', 'c.commission_percent',
                 'c.gross_commission', 'c.tds_percent', 'c.tds_amount', 'c.net_payable',
                 'c.description', 'c.status', 'c.created_at',
                 'u.name as user_name',
-                'd.order_no'
+                'd.id as dist_order_id',
+                'd.order_number as order_ref'
             )
+            ->selectRaw("
+                CASE WHEN c.cr_dr = 'Dr' THEN -c.gross_commission ELSE c.gross_commission END as signed_gross_commission,
+                CASE WHEN c.cr_dr = 'Dr' THEN -c.tds_amount ELSE c.tds_amount END as signed_tds_amount,
+                CASE WHEN c.cr_dr = 'Dr' THEN -c.net_payable ELSE c.net_payable END as signed_net_payable
+            ")
             ->latest('c.created_at');
 
         // Scope: non-admins only see their own commission entries
-        if (!$user->isSuperAdmin()) {
+        if (!$user->isAdmin()) {
             $query->where('c.user_id', $user->id);
         }
 
@@ -1015,33 +1379,88 @@ class ReportController extends Controller
         if ($request->filled('date_to')) {
             $query->whereDate('c.created_at', '<=', $request->date_to);
         }
-        if ($request->filled('user_id') && $user->isSuperAdmin()) {
+        if ($request->filled('user_id') && $user->isAdmin()) {
             $query->where('c.user_id', $request->user_id);
         }
 
         $commissions = $query->paginate(30)->withQueryString();
 
         // Totals for filter window
-        $totalsQuery = clone $query->getQuery();
-        $totals = $totalsQuery->reorder()->selectRaw('
-            SUM(gross_commission) as total_gross,
-            SUM(tds_amount) as total_tds,
-            SUM(net_payable) as total_net,
+        $totals = (clone $query)->reorder()->selectRaw('
+            SUM(CASE WHEN cr_dr = "Dr" THEN -gross_commission ELSE gross_commission END) as total_gross,
+            SUM(CASE WHEN cr_dr = "Dr" THEN -tds_amount ELSE tds_amount END) as total_tds,
+            SUM(CASE WHEN cr_dr = "Dr" THEN -net_payable ELSE net_payable END) as total_net,
             COUNT(*) as total_entries
         ')->first();
+        /** @var object{total_entries:mixed,total_gross:mixed,total_tds:mixed,total_net:mixed}|null $totals */
 
         // For admin: list of users who have commissions for filtering
-        $users = $user->isSuperAdmin()
+        $users = $user->isAdmin()
             ? DB::table('commissions')->join('users', 'commissions.user_id', '=', 'users.id')
                 ->distinct()->select('users.id', 'users.name')->get()
             : collect();
 
+        if ($format = $this->requestedExportFormat($request)) {
+            $headers = ['User', 'Order Ref', 'Type', 'Direction', 'Trigger', 'Status', 'Gross', 'TDS', 'Net', 'Created At', 'Description'];
+            $rows = collect($commissions->items())
+                ->map(fn (object $row) => [
+                    $row->user_name,
+                    $row->order_ref ?: ('#' . $row->dist_order_id),
+                    $row->type,
+                    $row->cr_dr,
+                    $row->trigger_event,
+                    $row->status,
+                    round((float) $row->signed_gross_commission, 2),
+                    round((float) $row->signed_tds_amount, 2),
+                    round((float) $row->signed_net_payable, 2),
+                    optional(Carbon::parse($row->created_at))->format('Y-m-d H:i'),
+                    $row->description,
+                ])
+                ->all();
+
+            $meta = [
+                'Entries' => (int) ($totals->total_entries ?? 0),
+                'Total Gross' => round((float) ($totals->total_gross ?? 0), 2),
+                'Total TDS' => round((float) ($totals->total_tds ?? 0), 2),
+                'Total Net' => round((float) ($totals->total_net ?? 0), 2),
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'commission_report',
+                    sheetTitle: 'Commissions',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'commission_report',
+                    title: 'Commission Report',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($headers, $rows) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($rows as $row) {
+                    fputcsv($file, (array) $row);
+                }
+                fclose($file);
+            }, 'commission_report_' . date('Ymd_His') . '.csv');
+        }
+
         return Inertia::render('Reports/Commission/Index', [
             'commissions' => $commissions,
-            'totals'      => $totals,
+            'summary'     => $totals,
             'users'       => $users,
             'filters'     => $request->only(['status', 'type', 'date_from', 'date_to', 'user_id']),
-            'isAdmin'     => $user->isSuperAdmin(),
+            'isAdmin'     => $user->isAdmin(),
         ]);
     }
 
@@ -1195,6 +1614,162 @@ class ReportController extends Controller
             'summary' => $summary,
             'filters' => $request->only(['search', 'min_outstanding']),
         ]);
+    }
+
+    /**
+     * Franchise stock that is near expiry, useful for redistribution planning.
+     */
+    public function nearExpiryDispatch(Request $request)
+    {
+        $this->authorize('view reports');
+        $allowedIds = $this->getAllowedFranchiseeIds($request->user());
+
+        $days = max(1, (int) $request->input('days', 60));
+        $threshold = Carbon::now()->addDays($days)->endOfDay();
+
+        $query = DB::table('inventory_ledgers as il')
+            ->join('products as p', 'p.id', '=', 'il.product_id')
+            ->join('franchisees as f', 'f.id', '=', 'il.location_id')
+            ->where('il.location_type', 'franchisee')
+            ->whereNotNull('il.expiry_date')
+            ->whereDate('il.expiry_date', '<=', $threshold)
+            ->when($allowedIds !== null, fn ($q) => $q->whereIn('il.location_id', $allowedIds))
+            ->when($request->filled('franchisee_id'), fn ($q) => $q->where('il.location_id', (int) $request->input('franchisee_id')))
+            ->when($request->filled('search'), function ($q) use ($request) {
+                $term = trim((string) $request->input('search'));
+                $q->where(function ($inner) use ($term) {
+                    $inner->where('p.product_name', 'like', "%{$term}%")
+                        ->orWhere('p.sku', 'like', "%{$term}%")
+                        ->orWhere('il.batch_no', 'like', "%{$term}%")
+                        ->orWhere('f.shop_name', 'like', "%{$term}%");
+                });
+            })
+            ->selectRaw('f.id as franchisee_id, f.shop_name, f.shop_code, p.id as product_id, p.product_name, p.sku, il.batch_no, il.expiry_date, il.mrp, SUM(il.qty_in - il.qty_out) as stock')
+            ->groupBy('f.id', 'f.shop_name', 'f.shop_code', 'p.id', 'p.product_name', 'p.sku', 'il.batch_no', 'il.expiry_date', 'il.mrp')
+            ->having('stock', '>', 0)
+            ->orderBy('il.expiry_date')
+            ->orderByDesc('stock');
+
+        $rows = $query->get()->map(function ($row) {
+            $expiryDate = Carbon::parse($row->expiry_date);
+
+            return [
+                'franchisee_id' => (int) $row->franchisee_id,
+                'shop_name' => $row->shop_name,
+                'shop_code' => $row->shop_code,
+                'product_id' => (int) $row->product_id,
+                'product_name' => $row->product_name,
+                'sku' => $row->sku,
+                'batch_no' => $row->batch_no,
+                'expiry_date' => $expiryDate->toDateString(),
+                'days_left' => max(0, Carbon::now()->startOfDay()->diffInDays($expiryDate, false)),
+                'stock' => round((float) $row->stock, 2),
+                'mrp' => round((float) ($row->mrp ?? 0), 2),
+                'stock_value_mrp' => round((float) $row->stock * (float) ($row->mrp ?? 0), 2),
+            ];
+        })->values();
+
+        $summary = [
+            'affected_franchisees' => $rows->pluck('franchisee_id')->unique()->count(),
+            'at_risk_batches' => $rows->count(),
+            'at_risk_units' => round((float) $rows->sum('stock'), 2),
+            'at_risk_value_mrp' => round((float) $rows->sum('stock_value_mrp'), 2),
+        ];
+
+        if ($format = $this->requestedExportFormat($request)) {
+            $headers = ['Franchisee', 'Shop Code', 'Product', 'SKU', 'Batch', 'Expiry Date', 'Days Left', 'Stock', 'MRP', 'MRP Exposure'];
+            $exportRows = $rows->map(fn (array $row) => [
+                $row['shop_name'],
+                $row['shop_code'],
+                $row['product_name'],
+                $row['sku'],
+                $row['batch_no'],
+                $row['expiry_date'],
+                $row['days_left'],
+                $row['stock'],
+                $row['mrp'],
+                $row['stock_value_mrp'],
+            ])->all();
+
+            $meta = [
+                'Window (Days)' => $days,
+                'Affected Franchisees' => $summary['affected_franchisees'],
+                'At-Risk Batches' => $summary['at_risk_batches'],
+                'At-Risk Units' => $summary['at_risk_units'],
+                'MRP Exposure' => $summary['at_risk_value_mrp'],
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'near_expiry_dispatch',
+                    sheetTitle: 'Near Expiry',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'near_expiry_dispatch',
+                    title: 'Near-Expiry Dispatch Report',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($headers, $exportRows) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($exportRows as $row) {
+                    fputcsv($file, $row);
+                }
+                fclose($file);
+            }, 'near_expiry_dispatch_' . date('Ymd_His') . '.csv');
+        }
+
+        $franchisees = Franchisee::query()
+            ->select('id', 'shop_name')
+            ->when($allowedIds !== null, fn ($q) => $q->whereIn('id', $allowedIds))
+            ->orderBy('shop_name')
+            ->get();
+
+        return Inertia::render('Reports/Stock/NearExpiryDispatch', [
+            'rows' => $rows,
+            'summary' => $summary,
+            'franchisees' => $franchisees,
+            'filters' => $request->only(['days', 'search', 'franchisee_id']),
+        ]);
+    }
+
+    private function formatGrowthRow(object $row, string $labelField, string $codeField): array
+    {
+        $currentSales = round((float) ($row->current_sales ?? 0), 2);
+        $previousSales = round((float) ($row->previous_sales ?? 0), 2);
+        $yearAgoSales = round((float) ($row->year_ago_sales ?? 0), 2);
+
+        return [
+            'id' => (int) $row->id,
+            'label' => $row->{$labelField},
+            'code' => $row->{$codeField},
+            'current_sales' => $currentSales,
+            'previous_sales' => $previousSales,
+            'year_ago_sales' => $yearAgoSales,
+            'mom_delta' => round($currentSales - $previousSales, 2),
+            'yoy_delta' => round($currentSales - $yearAgoSales, 2),
+            'mom_percent' => $this->growthPercent($currentSales, $previousSales),
+            'yoy_percent' => $this->growthPercent($currentSales, $yearAgoSales),
+        ];
+    }
+
+    private function growthPercent(float $current, float $baseline): float
+    {
+        if ($baseline <= 0) {
+            return $current > 0 ? 100.0 : 0.0;
+        }
+
+        return round((($current - $baseline) / $baseline) * 100, 2);
     }
 }
 

@@ -163,14 +163,23 @@ class FranchiseeController extends Controller
      */
     public function show(Franchisee $franchisee)
     {
-        $franchisee->load(['state', 'district', 'city', 'districtHead', 'zoneHead', 'stateHead', 'users', 'approvedBy']);
-        $franchisee->loadCount('users');
+        $user = request()->user();
+
+        $franchisee = Franchisee::query()
+            ->with(['state', 'district', 'city', 'districtHead', 'zoneHead', 'stateHead', 'users', 'approvedBy'])
+            ->withCount('users')
+            ->whereKey($franchisee->id)
+            ->when($user->isStateHead(), fn ($query) => $query->whereIn('state_id', $user->assignedStateIds()))
+            ->when($user->isZoneHead() || $user->isDistrictHead(), fn ($query) => $query->whereIn('district_id', $user->assignedDistrictIds()))
+            ->firstOrFail();
 
         return Inertia::render('Network/Franchisees/Profile', [
             'franchisee' => new FranchiseeResource($franchisee),
             'contextMode' => 'network',
             'allowEdit' => true,
-            'allowProvision' => true,
+            'allowApproval' => false,
+            'allowLifecycleActions' => $user->isAdmin(),
+            'allowProvision' => $user->isAdmin(),
         ]);
     }
 

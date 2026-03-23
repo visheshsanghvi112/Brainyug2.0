@@ -450,6 +450,7 @@ final class ErpModuleAccess
             'franchise.staff.' => ['module' => 'franchise_staff', 'action' => 'view'],
             'tickets.' => ['module' => 'tickets', 'action' => 'view'],
             'meetings.' => ['module' => 'meetings', 'action' => 'view'],
+            'announcements.' => ['module' => 'meetings', 'action' => 'view'],
             'shop-visits.' => ['module' => 'shop_visits', 'action' => 'view'],
             'ledger.' => ['module' => 'ledger', 'action' => 'view'],
             'expenses.' => ['module' => 'expenses', 'action' => 'view'],

@@ -94,7 +94,8 @@ class MigrateLegacyMasters extends Command
             $hsnCode = trim($row['hsn_code']);
             // Skip duplicate hsn_code that maps to a different ID
             $existing = DB::table('hsn_masters')->where('hsn_code', $hsnCode)->first();
-            if ($existing && $existing->id != $row['id']) {
+            /** @var object{id:int}|null $existing */
+            if ($existing !== null && (int) $existing->id !== (int) $row['id']) {
                 continue;
             }
 

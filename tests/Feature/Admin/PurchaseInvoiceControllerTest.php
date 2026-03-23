@@ -11,6 +11,7 @@ use App\Models\InventoryLedger;
 use App\Models\ItemCategory;
 use App\Models\Product;
 use App\Models\PurchaseInvoice;
+use App\Models\PurchaseReturn;
 use App\Models\RackArea;
 use App\Models\RackSection;
 use App\Models\SaltMaster;
@@ -19,6 +20,7 @@ use App\Models\User;
 use App\Services\InventoryService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Inertia\Testing\AssertableInertia;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -193,6 +195,433 @@ class PurchaseInvoiceControllerTest extends TestCase
             ->value('stock');
 
         $this->assertSame(2.0, $stock);
+    }
+
+    public function test_draft_invoice_show_exposes_edit_action_and_update_changes_totals(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Editable Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Editable Product',
+            'sku' => 'PUR-EDIT-001',
+            'mrp' => 200,
+            'is_active' => true,
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0100',
+            'supplier_id' => $supplier->id,
+            'supplier_invoice_no' => 'EDIT-REF-1',
+            'invoice_date' => now()->toDateString(),
+            'received_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'discount_amount' => 0,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 112,
+            'tax_type' => 'intra_state',
+            'status' => 'draft',
+            'created_by' => $user->id,
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'EDIT-BATCH-1',
+            'expiry_date' => now()->addYear()->toDateString(),
+            'mfg_date' => now()->subMonth()->toDateString(),
+            'qty' => 1,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 200,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 12,
+            'hsn_id' => $support['hsn']->id,
+            'taxable_amount' => 100,
+            'total_amount' => 112,
+        ]);
+
+        $this->actingAs($user)
+            ->get(route('admin.purchase-invoices.show', $invoice->id))
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('Procurement/PurchaseInvoices/Show')
+                ->where('actions.can_edit', true)
+                ->where('actions.can_approve', true)
+                ->where('actions.can_cancel', true)
+            );
+
+        $this->actingAs($user)
+            ->put(route('admin.purchase-invoices.update', $invoice->id), [
+                'supplier_id' => $supplier->id,
+                'supplier_invoice_no' => 'EDIT-REF-1A',
+                'invoice_date' => now()->toDateString(),
+                'received_date' => now()->toDateString(),
+                'due_days' => 15,
+                'tax_type' => 'intra_state',
+                'items' => [[
+                    'product_id' => $product->id,
+                    'batch_no' => 'EDIT-BATCH-2',
+                    'expiry_date' => now()->addYear()->toDateString(),
+                    'mfg_date' => now()->subMonth()->toDateString(),
+                    'qty' => 2,
+                    'free_qty' => 1,
+                    'mrp' => 200,
+                    'rate' => 125,
+                    'discount_percent' => 10,
+                    'gst_percent' => 12,
+                    'hsn_id' => $support['hsn']->id,
+                ]],
+            ])
+            ->assertRedirect(route('admin.purchase-invoices.show', $invoice->id));
+
+        $invoice->refresh();
+        $item = $invoice->items()->firstOrFail();
+
+        $this->assertSame('EDIT-REF-1A', $invoice->supplier_invoice_no);
+        $this->assertSame(225.0, (float) $invoice->subtotal);
+        $this->assertSame(13.5, (float) $invoice->sgst_amount);
+        $this->assertSame(13.5, (float) $invoice->cgst_amount);
+        $this->assertSame(252.0, (float) $invoice->total_amount);
+        $this->assertSame('EDIT-BATCH-2', $item->batch_no);
+        $this->assertSame(225.0, (float) $item->taxable_amount);
+        $this->assertSame(27.0, (float) $item->gst_amount);
+    }
+
+    public function test_approved_invoice_update_is_blocked(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Locked Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Locked Product',
+            'sku' => 'PUR-LOCK-001',
+            'mrp' => 150,
+            'is_active' => true,
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0101',
+            'supplier_id' => $supplier->id,
+            'supplier_invoice_no' => 'LOCK-REF-1',
+            'invoice_date' => now()->toDateString(),
+            'received_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'discount_amount' => 0,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 112,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'LOCK-BATCH-1',
+            'expiry_date' => now()->addYear()->toDateString(),
+            'mfg_date' => now()->subMonth()->toDateString(),
+            'qty' => 1,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 150,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 12,
+            'hsn_id' => $support['hsn']->id,
+            'taxable_amount' => 100,
+            'total_amount' => 112,
+        ]);
+
+        $this->actingAs($user)
+            ->from(route('admin.purchase-invoices.show', $invoice->id))
+            ->put(route('admin.purchase-invoices.update', $invoice->id), [
+                'supplier_id' => $supplier->id,
+                'supplier_invoice_no' => 'LOCK-REF-2',
+                'invoice_date' => now()->toDateString(),
+                'received_date' => now()->toDateString(),
+                'due_days' => 0,
+                'tax_type' => 'intra_state',
+                'items' => [[
+                    'product_id' => $product->id,
+                    'batch_no' => 'LOCK-BATCH-2',
+                    'expiry_date' => now()->addYear()->toDateString(),
+                    'mfg_date' => now()->subMonth()->toDateString(),
+                    'qty' => 2,
+                    'free_qty' => 0,
+                    'mrp' => 150,
+                    'rate' => 120,
+                    'discount_percent' => 0,
+                    'gst_percent' => 12,
+                    'hsn_id' => $support['hsn']->id,
+                ]],
+            ])
+            ->assertRedirect(route('admin.purchase-invoices.show', $invoice->id))
+            ->assertSessionHas('error', 'Only draft invoices can be updated.');
+
+        $invoice->refresh();
+        $item = $invoice->items()->firstOrFail();
+
+        $this->assertSame('LOCK-REF-1', $invoice->supplier_invoice_no);
+        $this->assertSame('LOCK-BATCH-1', $item->batch_no);
+        $this->assertSame(112.0, (float) $invoice->total_amount);
+    }
+
+    public function test_purchase_invoice_export_supports_excel_download(): void
+    {
+        $user = $this->makeSuperAdminUser();
+
+        $supplier = Supplier::create([
+            'name' => 'Export Supplier',
+            'is_active' => true,
+        ]);
+
+        PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0999',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 500,
+            'discount_amount' => 0,
+            'sgst_amount' => 30,
+            'cgst_amount' => 30,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 560,
+            'tax_type' => 'intra_state',
+            'status' => 'draft',
+            'created_by' => $user->id,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->get(route('admin.purchase-invoices.export', ['format' => 'excel']));
+
+        $response->assertOk();
+        $this->assertStringContainsString('.xlsx', (string) $response->headers->get('content-disposition'));
+    }
+
+    public function test_cancel_is_blocked_when_linked_purchase_returns_exist(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Linked Return Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Linked Return Product',
+            'sku' => 'PUR-LINK-001',
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0102',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 500,
+            'discount_amount' => 0,
+            'sgst_amount' => 30,
+            'cgst_amount' => 30,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 560,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'LINK-BATCH-1',
+            'expiry_date' => now()->addMonths(8)->toDateString(),
+            'mfg_date' => now()->subMonth()->toDateString(),
+            'qty' => 5,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 120,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 60,
+            'hsn_id' => $support['hsn']->id,
+            'taxable_amount' => 500,
+            'total_amount' => 560,
+        ]);
+
+        PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0102',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'total_amount' => 112,
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->from(route('admin.purchase-invoices.show', $invoice->id))
+            ->post(route('admin.purchase-invoices.cancel', $invoice->id));
+
+        $response->assertRedirect(route('admin.purchase-invoices.show', $invoice->id));
+        $response->assertSessionHasErrors('status');
+
+        $invoice->refresh();
+        $this->assertSame('approved', $invoice->status);
+    }
+
+    public function test_show_exposes_return_summary_and_hides_cancel_when_returns_are_active(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Return Summary Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Return Summary Product',
+            'sku' => 'PUR-SUM-001',
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0103',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 300,
+            'discount_amount' => 0,
+            'sgst_amount' => 18,
+            'cgst_amount' => 18,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 336,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'SUM-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'mfg_date' => now()->subMonth()->toDateString(),
+            'qty' => 5,
+            'free_qty' => 1,
+            'unit' => 'pcs',
+            'mrp' => 100,
+            'rate' => 50,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 36,
+            'hsn_id' => $support['hsn']->id,
+            'taxable_amount' => 300,
+            'total_amount' => 336,
+        ]);
+
+        $approvedReturn = PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0103',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'total_amount' => 112,
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+        ]);
+
+        $approvedReturn->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'SUM-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'qty' => 2,
+            'rate' => 50,
+            'gst_percent' => 12,
+            'gst_amount' => 12,
+            'total_amount' => 112,
+        ]);
+
+        $draftReturn = PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0104',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 50,
+            'sgst_amount' => 3,
+            'cgst_amount' => 3,
+            'igst_amount' => 0,
+            'total_amount' => 56,
+            'status' => 'draft',
+            'created_by' => $user->id,
+        ]);
+
+        $draftReturn->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'SUM-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'qty' => 1,
+            'rate' => 50,
+            'gst_percent' => 12,
+            'gst_amount' => 6,
+            'total_amount' => 56,
+        ]);
+
+        $this->actingAs($user)
+            ->get(route('admin.purchase-invoices.show', $invoice->id))
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('Procurement/PurchaseInvoices/Show')
+                ->where('actions.can_cancel', false)
+                ->where('actions.can_create_return', true)
+                ->where('returnSummary.purchased_qty', 6)
+                ->where('returnSummary.approved_returned_qty', 2)
+                ->where('returnSummary.draft_return_qty', 1)
+                ->where('returnSummary.remaining_returnable_qty', 4)
+                ->where('linkedReturns.0.return_number', 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0103')
+            );
     }
 
     private function makeSuperAdminUser(): User

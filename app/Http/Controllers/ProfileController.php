@@ -74,11 +74,16 @@ class ProfileController extends Controller
             'show_purchase_rate' => ['boolean'],
             'csv_format' => ['nullable', 'string', 'in:marg,acme,medvision'],
             'receipt_layout' => ['nullable', 'string', 'in:thermal,a4'],
+            'round_off_enabled' => ['boolean'],
+            'round_off_mode' => ['nullable', 'string', 'in:nearest,up,down,none'],
             'auto_print_after_checkout' => ['boolean'],
             'auto_open_invoice_after_checkout' => ['boolean'],
             'auto_lock_bill_on_hold' => ['boolean'],
             'smart_batch_suggestion' => ['boolean'],
             'low_stock_daily_digest' => ['boolean'],
+            'bill_logo_url' => ['nullable', 'string', 'max:500'],
+            'bill_header_line_1' => ['nullable', 'string', 'max:120'],
+            'bill_header_line_2' => ['nullable', 'string', 'max:120'],
         ]);
 
         $user = $request->user();
@@ -107,11 +112,16 @@ class ProfileController extends Controller
             'show_purchase_rate' => false,
             'csv_format' => 'marg',
             'receipt_layout' => 'thermal',
+            'round_off_enabled' => true,
+            'round_off_mode' => 'nearest',
             'auto_print_after_checkout' => true,
             'auto_open_invoice_after_checkout' => true,
             'auto_lock_bill_on_hold' => false,
             'smart_batch_suggestion' => true,
             'low_stock_daily_digest' => true,
+            'bill_logo_url' => null,
+            'bill_header_line_1' => null,
+            'bill_header_line_2' => null,
         ];
 
         $prefs = is_array($user->preferences) ? $user->preferences : [];

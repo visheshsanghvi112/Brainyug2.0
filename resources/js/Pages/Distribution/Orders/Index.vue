@@ -27,6 +27,7 @@ let filterDebounceTimer = null;
 const statusColors = {
     pending: 'bg-yellow-100 text-yellow-800 border-yellow-200',
     accepted: 'bg-blue-100 text-blue-800 border-blue-200',
+    allocated: 'bg-cyan-100 text-cyan-800 border-cyan-200',
     dispatched: 'bg-indigo-100 text-indigo-800 border-indigo-200',
     delivered: 'bg-green-100 text-green-800 border-green-200',
     rejected: 'bg-red-100 text-red-800 border-red-200',
@@ -52,10 +53,16 @@ const queueCards = [
         tone: 'bg-amber-50 border-amber-200 text-amber-800',
     },
     {
+        key: 'pending_allocation',
+        label: 'Pending Allocation',
+        hint: 'Approved orders waiting for batch locking',
+        tone: 'bg-sky-50 border-sky-200 text-sky-800',
+    },
+    {
         key: 'pending_dispatch',
         label: 'Pending Dispatch',
-        hint: 'Accepted bills waiting dispatch lock-in',
-        tone: 'bg-indigo-50 border-indigo-200 text-indigo-800',
+        hint: 'Allocated orders ready for shipment execution',
+        tone: 'bg-cyan-50 border-cyan-200 text-cyan-800',
     },
     {
         key: 'payment_review',
@@ -66,7 +73,7 @@ const queueCards = [
     {
         key: 'open_work',
         label: 'Open Workload',
-        hint: 'Pending + accepted + dispatched',
+        hint: 'Pending + approved + allocated + dispatched',
         tone: 'bg-slate-50 border-slate-200 text-slate-800',
     },
 ];
@@ -125,7 +132,8 @@ const formatDate = (dateString) => {
                         >
                             <option value="">All Statuses</option>
                             <option value="pending">Pending (Action Required)</option>
-                            <option value="accepted">Accepted (Ready for Dispatch)</option>
+                            <option value="accepted">Approved (Pending Allocation)</option>
+                            <option value="allocated">Allocated (Ready for Dispatch)</option>
                             <option value="dispatched">Dispatched</option>
                             <option value="delivered">Delivered</option>
                             <option value="rejected">Rejected</option>

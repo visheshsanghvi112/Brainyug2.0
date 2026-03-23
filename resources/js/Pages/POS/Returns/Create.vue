@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue';
-import { Head, useForm, Link } from '@inertiajs/vue3';
+import { Head, useForm, Link, router } from '@inertiajs/vue3';
+import axios from 'axios';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import { TrashIcon, MagnifyingGlassIcon } from '@heroicons/vue/24/outline';
 
@@ -14,6 +15,14 @@ const form = useForm({
     items: []
 });
 
+const customerMobile = ref('');
+const selectedCustomer = ref(null);
+const recentBills = ref([]);
+const selectedBill = ref(null);
+const loadingBills = ref(false);
+const loadingBillItems = ref(false);
+const submittingInvoiceReturn = ref(false);
+
 const searchQuery = ref('');
 const filteredProducts = computed(() => {
     if (!searchQuery.value) return [];
@@ -24,6 +33,7 @@ const addItem = (product) => {
     form.items.push({
         product_id: product.id,
         product_name: product.product_name,
+        sales_invoice_item_id: null,
         batch_no: '',
         qty: 1,
         rate: 0,
@@ -42,7 +52,163 @@ const removeItem = (i) => form.items.splice(i, 1);
 
 const totalRefund = computed(() => form.items.reduce((sum, item) => sum + item.refund_amount, 0).toFixed(2));
 
-const submit = () => form.post(route('pos.returns.store'));
+const isInvoiceBasedReturn = computed(() => !!selectedBill.value && form.items.some(i => !!i.sales_invoice_item_id));
+
+const loadCustomerBills = async () => {
+    selectedCustomer.value = null;
+    recentBills.value = [];
+    selectedBill.value = null;
+
+    const mobile = (customerMobile.value || '').trim();
+    if (mobile.length < 8) {
+        alert('Enter a valid customer mobile number first.');
+        return;
+    }
+
+    loadingBills.value = true;
+    try {
+        const customerRes = await axios.post(route('pos.lookupCustomer'), { mobile });
+        const customer = customerRes.data;
+
+        if (!customer?.id) {
+            alert('Customer not found for this mobile.');
+            return;
+        }
+
+        selectedCustomer.value = customer;
+
+        const billsRes = await axios.post(route('pos.customerRecentBills'), {
+            customer_id: customer.id,
+            limit: 10,
+        });
+
+        recentBills.value = billsRes.data || [];
+        if (!recentBills.value.length) {
+            alert('No recent completed bills found for this customer.');
+        }
+    } catch (e) {
+        const msg = e?.response?.data?.message || 'Unable to fetch customer bills.';
+        alert(msg);
+    } finally {
+        loadingBills.value = false;
+    }
+};
+
+const loadBillItems = async (bill) => {
+    loadingBillItems.value = true;
+    try {
+        const res = await axios.get(route('pos.billItems', bill.id));
+        const invoice = res.data?.invoice;
+        const invoiceItems = res.data?.items || [];
+
+        selectedBill.value = invoice;
+        form.items = invoiceItems.map((item) => {
+            const qty = Number(item.qty || 0);
+            const rate = Number(item.rate || 0);
+            const gstPercent = Number(item.gst_percent || 0);
+            const refundAmount = rate * qty * (1 + (gstPercent / 100));
+
+            return {
+                product_id: item.product_id,
+                product_name: item.product_name,
+                sales_invoice_item_id: item.sales_invoice_item_id,
+                batch_no: item.batch_no || '',
+                qty,
+                max_qty: qty,
+                rate,
+                gst_percent: gstPercent,
+                refund_amount: refundAmount,
+                status: 'restocked'
+            };
+        });
+    } catch (e) {
+        const msg = e?.response?.data?.message || 'Unable to load bill items.';
+        alert(msg);
+    } finally {
+        loadingBillItems.value = false;
+    }
+};
+
+const submit = async () => {
+    if (isInvoiceBasedReturn.value) {
+        const returnLines = form.items
+            .filter(i => Number(i.qty) > 0)
+            .map(i => ({
+                sales_invoice_item_id: i.sales_invoice_item_id,
+                return_qty: Number(i.qty),
+                line_amount: Number(i.rate || 0) * Number(i.qty || 0) * (1 + (Number(i.gst_percent || 0) / 100)),
+            }));
+
+        if (!returnLines.length) {
+            alert('Add at least one return line quantity greater than zero.');
+            return;
+        }
+
+        const supervisorUsername = String(window.prompt('Supervisor username for return approval:', '') || '').trim();
+        if (!supervisorUsername) return;
+
+        const supervisorPassword = String(window.prompt('Supervisor password:', '') || '');
+        if (!supervisorPassword) return;
+
+        const overrideReason = String(window.prompt('Reason for processing this return:', form.reason || 'POS return approval') || '').trim();
+        if (overrideReason.length < 5) {
+            alert('Reason must be at least 5 characters for supervisor approval.');
+            return;
+        }
+
+        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const totalAmount = Number(returnLines.reduce((sum, line) => sum + Number(line.line_amount || 0), 0).toFixed(2));
+        const snapshot = {
+            item_count: Number(returnLines.length || 0),
+            max_line_discount: 0,
+            bill_discount_percent: 0,
+            total_amount: totalAmount,
+        };
+
+        submittingInvoiceReturn.value = true;
+        try {
+            const authRes = await axios.post(route('pos.override.authorize'), {
+                action: 'return_override',
+                request_id: requestId,
+                reason: overrideReason,
+                supervisor_username: supervisorUsername,
+                supervisor_password: supervisorPassword,
+                approval_snapshot: snapshot,
+            });
+
+            const token = String(authRes?.data?.token || '');
+            if (!token) {
+                alert('Supervisor approval token missing. Please retry.');
+                return;
+            }
+
+            await axios.post(route('pos.processReturn'), {
+                original_bill_no: selectedBill.value.bill_no,
+                reason: form.reason,
+                refund_mode: form.refund_mode,
+                override_request_id: requestId,
+                override_token: token,
+                override_reason: overrideReason,
+                override_snapshot: snapshot,
+                items: returnLines.map(i => ({
+                        sales_invoice_item_id: i.sales_invoice_item_id,
+                    return_qty: Number(i.return_qty),
+                    })),
+            });
+
+            alert('Sales return processed against original bill successfully.');
+            router.visit(route('pos.returns.index'));
+        } catch (e) {
+            const msg = e?.response?.data?.message || 'Unable to process invoice-based return.';
+            alert(msg);
+        } finally {
+            submittingInvoiceReturn.value = false;
+        }
+        return;
+    }
+
+    form.post(route('pos.returns.store'));
+};
 </script>
 
 <template>
@@ -53,6 +219,43 @@ const submit = () => form.post(route('pos.returns.store'));
         </template>
 
         <form @submit.prevent="submit" class="space-y-6 max-w-5xl">
+            <div class="bg-white p-6 shadow rounded-lg border border-gray-200">
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-bold text-gray-700 mb-1">Customer Mobile (for previous bill return)</label>
+                        <input type="text" v-model="customerMobile" class="w-full border-gray-300 rounded" placeholder="Enter mobile number...">
+                    </div>
+                    <div>
+                        <button type="button" @click="loadCustomerBills" class="w-full bg-slate-800 text-white px-4 py-2 rounded hover:bg-slate-900" :disabled="loadingBills">
+                            {{ loadingBills ? 'Loading...' : 'Find Bills' }}
+                        </button>
+                    </div>
+                    <div v-if="selectedCustomer" class="text-sm text-emerald-700 font-bold">
+                        {{ selectedCustomer.name }}
+                    </div>
+                </div>
+
+                <div v-if="recentBills.length" class="mt-4 border rounded overflow-hidden">
+                    <div class="bg-slate-50 px-3 py-2 text-xs font-bold uppercase text-slate-500">Recent Bills (click to load items)</div>
+                    <div class="max-h-48 overflow-y-auto divide-y">
+                        <button
+                            v-for="bill in recentBills"
+                            :key="bill.id"
+                            type="button"
+                            @click="loadBillItems(bill)"
+                            class="w-full px-3 py-2 text-left hover:bg-emerald-50 flex justify-between items-center"
+                        >
+                            <span class="font-mono text-sm text-slate-700">{{ bill.bill_no }}</span>
+                            <span class="text-xs text-slate-500">₹ {{ Number(bill.total_amount || 0).toFixed(2) }}</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="selectedBill" class="mt-3 text-xs font-bold text-indigo-700">
+                    Loaded Bill: {{ selectedBill.bill_no }}
+                </div>
+            </div>
+
             <div class="bg-white p-6 shadow rounded-lg border border-gray-200">
                 <div class="grid grid-cols-2 gap-4">
                     <div>
@@ -102,13 +305,14 @@ const submit = () => form.post(route('pos.returns.store'));
                         <tr v-for="(item, i) in form.items" :key="i">
                             <td class="px-6 py-3 text-sm font-bold">{{ item.product_name }}</td>
                             <td class="px-6 py-3">
-                                <input type="text" v-model="item.batch_no" class="w-full text-xs p-1 border-gray-300 rounded uppercase text-center" placeholder="Batch...">
+                                <input type="text" v-model="item.batch_no" class="w-full text-xs p-1 border-gray-300 rounded uppercase text-center" placeholder="Batch..." :readonly="!!item.sales_invoice_item_id">
                             </td>
                             <td class="px-6 py-3">
-                                <input type="number" v-model="item.qty" @input="updateItem(item)" class="w-full text-sm p-1 border-gray-300 rounded text-center">
+                                <input type="number" v-model="item.qty" @input="updateItem(item)" class="w-full text-sm p-1 border-gray-300 rounded text-center" :max="item.max_qty || null" min="0.01">
+                                <div v-if="item.max_qty" class="text-[10px] text-center text-gray-500 mt-0.5">Max: {{ item.max_qty }}</div>
                             </td>
                             <td class="px-6 py-3">
-                                <input type="number" step="0.01" v-model="item.rate" @input="updateItem(item)" class="w-full text-sm p-1 border-gray-300 rounded text-right">
+                                <input type="number" step="0.01" v-model="item.rate" @input="updateItem(item)" class="w-full text-sm p-1 border-gray-300 rounded text-right" :readonly="!!item.sales_invoice_item_id">
                             </td>
                             <td class="px-6 py-3">
                                 <select v-model="item.status" class="w-full text-xs p-1 border-gray-300 rounded">
@@ -137,8 +341,8 @@ const submit = () => form.post(route('pos.returns.store'));
 
             <div class="flex justify-end gap-3">
                 <Link :href="route('pos.returns.index')" class="bg-white border px-4 py-2 rounded text-gray-700 hover:bg-gray-50">Cancel</Link>
-                <button type="submit" class="bg-indigo-600 text-white px-8 py-2 rounded font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transform transition active:scale-95" :disabled="form.processing">
-                    Confirm Return & Update Stock
+                <button type="submit" class="bg-indigo-600 text-white px-8 py-2 rounded font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transform transition active:scale-95" :disabled="form.processing || submittingInvoiceReturn || loadingBillItems">
+                    {{ isInvoiceBasedReturn ? 'Process Return Against Bill' : 'Confirm Return & Update Stock' }}
                 </button>
             </div>
         </form>

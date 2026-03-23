@@ -10,6 +10,7 @@ use App\Models\Supplier;
 use App\Models\Product;
 use App\Services\InventoryService;
 use App\Services\LedgerService;
+use App\Services\ReportExportService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -19,7 +20,8 @@ class PurchaseReturnController extends Controller
 {
     public function __construct(
         private InventoryService $inventoryService,
-        private LedgerService $ledgerService
+        private LedgerService $ledgerService,
+        private ReportExportService $reportExportService
     ) {}
 
     public function index(Request $request)
@@ -44,13 +46,74 @@ class PurchaseReturnController extends Controller
         ]);
     }
 
-    public function create()
+    public function create(Request $request)
     {
+        $prefillInvoice = null;
+
+        if ($request->filled('purchase_invoice_id')) {
+            $invoice = PurchaseInvoice::approved()
+                ->with(['supplier', 'items.product'])
+                ->findOrFail((int) $request->input('purchase_invoice_id'));
+
+            $alreadyReturnedByKey = PurchaseReturnItem::query()
+                ->selectRaw('purchase_return_items.product_id, purchase_return_items.batch_no, COALESCE(SUM(purchase_return_items.qty), 0) as returned_qty')
+                ->join('purchase_returns as pr', 'pr.id', '=', 'purchase_return_items.purchase_return_id')
+                ->where('pr.purchase_invoice_id', $invoice->id)
+                ->where('pr.status', 'approved')
+                ->groupBy('purchase_return_items.product_id', 'purchase_return_items.batch_no')
+                ->get()
+                ->mapWithKeys(fn($row) => [
+                    $row->product_id . '|' . $row->batch_no => (float) $row->returned_qty,
+                ]);
+
+            $prefillItems = collect($invoice->items)
+                ->groupBy(fn($item) => $item->product_id . '|' . $item->batch_no)
+                ->map(function ($group, $key) use ($alreadyReturnedByKey) {
+                    $first = $group->first();
+                    $purchasedQty = (float) $group->sum(fn($line) => (float) $line->qty + (float) $line->free_qty);
+                    $returnedQty = (float) ($alreadyReturnedByKey[$key] ?? 0);
+                    $remainingQty = round(max(0, $purchasedQty - $returnedQty), 2);
+
+                    if ($remainingQty <= 0) {
+                        return null;
+                    }
+
+                    return [
+                        'product_id' => $first->product_id,
+                        'product_name' => $first->product?->product_name,
+                        'batch_no' => $first->batch_no,
+                        'expiry_date' => optional($first->expiry_date)?->format('Y-m-d'),
+                        'qty' => $remainingQty,
+                        'max_qty' => $remainingQty,
+                        'rate' => round((float) $first->rate, 4),
+                        'gst_percent' => round((float) $first->gst_percent, 2),
+                        'reason' => '',
+                    ];
+                })
+                ->filter()
+                ->values();
+
+            if ($prefillItems->isEmpty()) {
+                return redirect()
+                    ->route('admin.purchase-invoices.show', $invoice->id)
+                    ->with('error', "Invoice {$invoice->invoice_number} has already been fully returned. No new purchase return can be raised from it.");
+            }
+
+            $prefillInvoice = [
+                'id' => $invoice->id,
+                'invoice_number' => $invoice->invoice_number,
+                'supplier_id' => $invoice->supplier_id,
+                'supplier_name' => $invoice->supplier?->name,
+                'items' => $prefillItems,
+            ];
+        }
+
         return Inertia::render('Procurement/PurchaseReturns/CreateEdit', [
             'suppliers' => Supplier::active()->orderBy('name')->get(['id', 'name']),
             'invoices' => PurchaseInvoice::approved()->latest()->take(50)->get(['id', 'invoice_number', 'supplier_id']),
             'products' => Product::where('is_active', true)->orderBy('product_name')->get(['id', 'product_name', 'sku']),
             'financialYear' => PurchaseInvoice::currentFinancialYear(),
+            'prefillInvoice' => $prefillInvoice,
         ]);
     }
 
@@ -74,6 +137,12 @@ class PurchaseReturnController extends Controller
         $linkedInvoice = null;
         if (!empty($validated['purchase_invoice_id'])) {
             $linkedInvoice = PurchaseInvoice::with('items')->findOrFail($validated['purchase_invoice_id']);
+
+            if ($linkedInvoice->status !== 'approved') {
+                return back()->withErrors([
+                    'purchase_invoice_id' => 'Only approved purchase invoices can be used as the source for a purchase return.',
+                ])->withInput();
+            }
 
             if ((int) $linkedInvoice->supplier_id !== (int) $validated['supplier_id']) {
                 return back()->withErrors([
@@ -106,7 +175,7 @@ class PurchaseReturnController extends Controller
             }
 
             $invoiceLineMap = $linkedInvoice
-                ? $linkedInvoice->items->groupBy(fn($i) => $i->product_id . '|' . $i->batch_no)
+                ? collect($linkedInvoice->items)->groupBy(fn($i) => $i->product_id . '|' . $i->batch_no)
                 : collect();
 
             foreach ($validated['items'] as $item) {
@@ -227,6 +296,12 @@ class PurchaseReturnController extends Controller
 
                 // Re-validate linked invoice constraints at approval time to prevent race conditions.
                 if ($lockedReturn->purchaseInvoice) {
+                    if ($lockedReturn->purchaseInvoice->status !== 'approved') {
+                        throw ValidationException::withMessages([
+                            'purchase_invoice_id' => 'Linked purchase invoice is no longer approved. Reverse or restore the source invoice before approving this return.',
+                        ]);
+                    }
+
                     $returnItemsPayload = $lockedReturn->items->map(function ($item) {
                         return [
                             'product_id' => $item->product_id,
@@ -377,7 +452,7 @@ class PurchaseReturnController extends Controller
      */
     public function export(Request $request)
     {
-        $query = PurchaseReturn::with(['supplier', 'createdBy'])
+        $query = PurchaseReturn::with(['supplier', 'purchaseInvoice', 'createdBy'])
             ->when($request->search, function ($q, $search) {
                 $q->where(function ($q2) use ($search) {
                     $q2->where('return_number', 'like', "%{$search}%")
@@ -389,10 +464,57 @@ class PurchaseReturnController extends Controller
             ->latest();
 
         $returns = $query->get();
+        $exportHeaders = [
+            'Return No', 'Date', 'Supplier', 'Linked Invoice', 'Status', 'Total Amount',
+            'CGST', 'SGST', 'IGST', 'Created By',
+        ];
+
+        $rows = $returns->map(fn (PurchaseReturn $return) => [
+            $return->return_number,
+            optional($return->return_date)?->format('Y-m-d'),
+            $return->supplier->name ?? '',
+            $return->purchaseInvoice?->invoice_number,
+            ucfirst($return->status),
+            round((float) $return->total_amount, 2),
+            round((float) $return->cgst_amount, 2),
+            round((float) $return->sgst_amount, 2),
+            round((float) $return->igst_amount, 2),
+            $return->createdBy->name ?? '',
+        ])->all();
+
+        $summary = [
+            'Returns' => $returns->count(),
+            'Draft' => $returns->where('status', 'draft')->count(),
+            'Approved' => $returns->where('status', 'approved')->count(),
+            'Cancelled' => $returns->where('status', 'cancelled')->count(),
+            'Total Amount' => round((float) $returns->sum('total_amount'), 2),
+        ];
+
+        $format = strtolower((string) $request->input('format', 'csv'));
+
+        if ($format === 'excel') {
+            return $this->reportExportService->downloadExcel(
+                fileBase: 'purchase_returns',
+                sheetTitle: 'Purchase Returns',
+                headers: $exportHeaders,
+                rows: $rows,
+                meta: $summary,
+            );
+        }
+
+        if ($format === 'pdf') {
+            return $this->reportExportService->downloadPdf(
+                fileBase: 'purchase_returns',
+                title: 'Purchase Returns',
+                headers: $exportHeaders,
+                rows: $rows,
+                meta: $summary,
+            );
+        }
 
         $filename = 'purchase_returns_' . date('Y-m-d_H-i-s') . '.csv';
 
-        $headers = [
+        $responseHeaders = [
             'Content-type' => 'text/csv',
             'Content-Disposition' => "attachment; filename={$filename}",
             'Pragma' => 'no-cache',
@@ -400,33 +522,18 @@ class PurchaseReturnController extends Controller
             'Expires' => '0',
         ];
 
-        $columns = [
-            'Return No', 'Date', 'Supplier', 'Status', 'Total Amount',
-            'CGST', 'SGST', 'IGST', 'Created By',
-        ];
-
-        $callback = function () use ($returns, $columns) {
+        $callback = function () use ($rows, $exportHeaders) {
             $file = fopen('php://output', 'w');
-            fputcsv($file, $columns);
+            fputcsv($file, $exportHeaders);
 
-            foreach ($returns as $return) {
-                fputcsv($file, [
-                    $return->return_number,
-                    optional($return->return_date)?->format('Y-m-d'),
-                    $return->supplier->name ?? '',
-                    ucfirst($return->status),
-                    $return->total_amount,
-                    $return->cgst_amount,
-                    $return->sgst_amount,
-                    $return->igst_amount,
-                    $return->createdBy->name ?? '',
-                ]);
+            foreach ($rows as $row) {
+                fputcsv($file, $row);
             }
 
             fclose($file);
         };
 
-        return response()->stream($callback, 200, $headers);
+        return response()->stream($callback, 200, $responseHeaders);
     }
 
     /**
@@ -436,7 +543,7 @@ class PurchaseReturnController extends Controller
     {
         $purchaseReturn->load(['supplier', 'purchaseInvoice', 'items.product', 'createdBy', 'approvedBy']);
 
-        return Inertia::render('Procurement/PurchaseReturns/Show', [
+        return Inertia::render('Procurement/PurchaseReturns/Print', [
             'purchaseReturn' => $purchaseReturn,
         ]);
     }

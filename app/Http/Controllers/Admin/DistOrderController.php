@@ -5,13 +5,15 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\B2bCart;
 use App\Models\DistOrder;
-use App\Models\DistOrderItem;
 use App\Models\DistOrderPayment;
 use App\Models\Product;
 use App\Models\User;
+use App\Services\DistOrderDispatchService;
+use App\Services\DistOrderAllocationService;
+use App\Services\DistOrderPaymentService;
+use App\Services\DistOrderReviewService;
+use App\Services\DistOrderWorkflowService;
 use App\Services\InventoryService;
-use App\Services\CommissionService;
-use App\Services\LedgerService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -23,8 +25,11 @@ class DistOrderController extends Controller
 
     public function __construct(
         private InventoryService $inventoryService,
-        private CommissionService $commissionService,
-        private LedgerService $ledgerService
+        private DistOrderWorkflowService $distOrderWorkflowService,
+        private DistOrderReviewService $distOrderReviewService,
+        private DistOrderAllocationService $distOrderAllocationService,
+        private DistOrderDispatchService $distOrderDispatchService,
+        private DistOrderPaymentService $distOrderPaymentService
     ) {}
 
     public function index(Request $request)
@@ -33,7 +38,9 @@ class DistOrderController extends Controller
         $queue = $request->string('queue')->toString();
 
         $applyVisibilityScope = function ($query) use ($user) {
-            $query->when($user->franchisee_id, fn ($q, $franchiseeId) => $q->where('franchisee_id', $franchiseeId));
+            $franchiseeId = $user->getEffectiveFranchiseeId();
+
+            $query->when($franchiseeId, fn ($q, $effectiveFranchiseeId) => $q->where('franchisee_id', $effectiveFranchiseeId));
         };
 
         $baseQuery = DistOrder::query();
@@ -52,19 +59,21 @@ class DistOrderController extends Controller
             })
             ->when($request->status, fn($q, $s) => $q->where('status', $s))
             ->when($queue === 'pending_orders', fn ($q) => $q->where('status', 'pending'))
-            ->when($queue === 'pending_dispatch', fn ($q) => $q->where('status', 'accepted'))
+            ->when($queue === 'pending_allocation', fn ($q) => $q->where('status', 'accepted'))
+            ->when($queue === 'pending_dispatch', fn ($q) => $q->where('status', 'allocated'))
             ->when($queue === 'payment_review', fn ($q) => $q->whereHas('payments', fn ($p) => $p->where('status', 'pending')))
-            ->when($queue === 'open_work', fn ($q) => $q->whereIn('status', ['pending', 'accepted', 'dispatched']))
-            ->orderByRaw("CASE status WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 WHEN 'dispatched' THEN 2 ELSE 3 END")
+            ->when($queue === 'open_work', fn ($q) => $q->whereIn('status', ['pending', 'accepted', 'allocated', 'dispatched']))
+            ->orderByRaw("CASE status WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 WHEN 'allocated' THEN 2 WHEN 'dispatched' THEN 3 ELSE 4 END")
             ->latest('id')
             ->paginate(15)
             ->withQueryString();
 
         $metrics = [
             'pending_orders' => (clone $baseQuery)->where('status', 'pending')->count(),
-            'pending_dispatch' => (clone $baseQuery)->where('status', 'accepted')->count(),
+            'pending_allocation' => (clone $baseQuery)->where('status', 'accepted')->count(),
+            'pending_dispatch' => (clone $baseQuery)->where('status', 'allocated')->count(),
             'payment_review' => (clone $baseQuery)->whereHas('payments', fn ($p) => $p->where('status', 'pending'))->count(),
-            'open_work' => (clone $baseQuery)->whereIn('status', ['pending', 'accepted', 'dispatched'])->count(),
+            'open_work' => (clone $baseQuery)->whereIn('status', ['pending', 'accepted', 'allocated', 'dispatched'])->count(),
         ];
 
         return Inertia::render('Distribution/Orders/Index', [
@@ -86,6 +95,7 @@ class DistOrderController extends Controller
             'items.product',
             'acceptedBy',
             'dispatchedBy',
+            'statusLogs.actor',
             'payments.createdBy',
             'payments.confirmedBy',
             'payments.rejectedBy',
@@ -100,6 +110,26 @@ class DistOrderController extends Controller
             'order' => $distOrder,
             'orderLock' => $orderLock,
             'paymentSummary' => $this->paymentSummary($distOrder),
+            'workflowLabels' => [
+                'current' => $this->distOrderWorkflowService->labelFor((string) $distOrder->status),
+                'labels' => collect([
+                    'pending',
+                    'accepted',
+                    'allocated',
+                    'dispatched',
+                    'delivered',
+                    'rejected',
+                    'cancelled',
+                ])->mapWithKeys(fn (string $status) => [
+                    $status => $this->distOrderWorkflowService->labelFor($status),
+                ])->all(),
+                'availableTransitions' => collect($this->distOrderWorkflowService->allowedTransitions((string) $distOrder->status))
+                    ->map(fn (string $status) => [
+                        'status' => $status,
+                        'label' => $this->distOrderWorkflowService->labelFor($status),
+                    ])
+                    ->values(),
+            ],
             'canReviewBills' => $this->canReviewBills($request->user()),
             'canReorderRejectedOrder' => $this->canReorderRejectedOrder($request->user(), $distOrder),
             'canSubmitPayment' => $this->canSubmitPayment($request->user(), $distOrder),
@@ -279,7 +309,9 @@ class DistOrderController extends Controller
     {
         $user = $request->user();
 
-        if (!$user->franchisee_id) {
+        $franchiseeId = $user->getEffectiveFranchiseeId();
+
+        if (!$franchiseeId) {
             abort(403, 'Only franchisee accounts can submit B2B payment details.');
         }
 
@@ -293,39 +325,11 @@ class DistOrderController extends Controller
             'narration' => 'nullable|string|max:1000',
         ]);
 
-        if (!in_array($distOrder->status, ['dispatched', 'delivered'], true)) {
-            abort(422, 'Payments can only be submitted after the order is dispatched.');
+        try {
+            $this->distOrderPaymentService->submit($distOrder, $user, $validated);
+        } catch (\DomainException $e) {
+            abort(422, $e->getMessage());
         }
-
-        DB::transaction(function () use ($distOrder, $user, $validated) {
-            $lockedOrder = DistOrder::whereKey($distOrder->id)
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            $reservedAmount = (float) DistOrderPayment::query()
-                ->where('dist_order_id', $lockedOrder->id)
-                ->whereIn('status', ['pending', 'confirmed'])
-                ->lockForUpdate()
-                ->sum('amount');
-
-            $availableToSubmit = round(max(0, (float) $lockedOrder->total_amount - $reservedAmount), 2);
-            $requestedAmount = round((float) $validated['amount'], 2);
-
-            if ($requestedAmount > $availableToSubmit) {
-                abort(422, "Payment exceeds outstanding amount available for submission. Available amount is {$availableToSubmit}.");
-            }
-
-            DistOrderPayment::create([
-                'dist_order_id' => $lockedOrder->id,
-                'franchisee_id' => $lockedOrder->franchisee_id,
-                'created_by' => $user->id,
-                'amount' => $requestedAmount,
-                'payment_mode' => $validated['payment_mode'],
-                'reference_no' => $validated['reference_no'] ?? null,
-                'payment_date' => $validated['payment_date'],
-                'narration' => $validated['narration'] ?? null,
-            ]);
-        });
 
         return back()->with('success', 'Payment submitted for HO confirmation.');
     }
@@ -338,43 +342,11 @@ class DistOrderController extends Controller
 
         $this->ensurePaymentBelongsToOrder($distOrder, $distOrderPayment);
 
-        DB::transaction(function () use ($request, $distOrder, $distOrderPayment) {
-            $lockedOrder = DistOrder::whereKey($distOrder->id)
-                ->lockForUpdate()
-                ->with('franchisee')
-                ->firstOrFail();
-
-            $payment = DistOrderPayment::whereKey($distOrderPayment->id)
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            if ($payment->status !== 'pending') {
-                abort(422, 'Only pending payments can be confirmed.');
-            }
-
-            $ledger = $this->ledgerService->recordEntry(
-                ledgerable: $lockedOrder->franchisee,
-                transactionType: 'PAYMENT_RECEIVED',
-                debit: 0,
-                credit: (float) $payment->amount,
-                reference: $payment,
-                paymentMode: strtolower($payment->payment_mode),
-                narration: $payment->narration
-                    ? "B2B payment for Order {$lockedOrder->order_number}: {$payment->narration}"
-                    : "B2B payment for Order {$lockedOrder->order_number}",
-                transactionDate: $payment->payment_date,
-            );
-
-            $payment->update([
-                'status' => 'confirmed',
-                'financial_ledger_id' => $ledger->id,
-                'confirmed_by' => $request->user()->id,
-                'confirmed_at' => now(),
-                'rejected_by' => null,
-                'rejected_at' => null,
-                'rejection_reason' => null,
-            ]);
-        });
+        try {
+            $this->distOrderPaymentService->confirm($distOrder, $distOrderPayment, $request->user());
+        } catch (\DomainException $e) {
+            abort(422, $e->getMessage());
+        }
 
         return back()->with('success', 'Payment confirmed and ledger updated.');
     }
@@ -391,39 +363,26 @@ class DistOrderController extends Controller
             'rejection_reason' => 'required|string|max:500',
         ]);
 
-        DB::transaction(function () use ($request, $distOrderPayment, $validated) {
-            $payment = DistOrderPayment::whereKey($distOrderPayment->id)
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            if ($payment->status !== 'pending') {
-                abort(422, 'Only pending payments can be rejected.');
-            }
-
-            $payment->update([
-                'status' => 'rejected',
-                'rejected_by' => $request->user()->id,
-                'rejected_at' => now(),
-                'rejection_reason' => $validated['rejection_reason'],
-            ]);
-        });
+        try {
+            $this->distOrderPaymentService->reject($distOrder, $distOrderPayment, $request->user(), $validated['rejection_reason']);
+        } catch (\DomainException $e) {
+            abort(422, $e->getMessage());
+        }
 
         return back()->with('success', 'Payment submission rejected.');
     }
 
     /**
      * Replaces the massive "ordereraccept_order()" function in legacy Dist_order.php.
-     * What was 100+ lines of raw SQL and dual-db updates is now a clean mapped transaction.
+     * Commercial approval happens here. Warehouse batch allocation is a separate step.
      */
     public function accept(Request $request, DistOrder $distOrder)
     {
         $this->assertCanMutateOrder($request->user());
 
-        // We assume batches are locked in on the frontend during acceptance
         $validated = $request->validate([
             'items' => 'required|array',
             'items.*.id' => 'required|exists:dist_order_items,id',
-            'items.*.batch_no' => 'nullable|string',
             'items.*.approved_qty' => 'required|numeric|min:0',
             'items.*.free_qty' => 'nullable|numeric|min:0',
             'items.*.rate' => 'required|numeric|min:0',
@@ -431,103 +390,9 @@ class DistOrderController extends Controller
         ]);
 
         try {
-            DB::transaction(function () use ($distOrder, $validated, $request) {
-                $lockedOrder = DistOrder::whereKey($distOrder->id)
-                    ->lockForUpdate()
-                    ->with(['items.product', 'franchisee'])
-                    ->firstOrFail();
+            $this->distOrderReviewService->approve($distOrder, $request->user(), $validated['items']);
 
-                if ($lockedOrder->status !== 'pending') {
-                    throw new \Exception('Only pending orders can be accepted.');
-                }
-
-                $this->assertOrderLockOwnership($request->user(), $lockedOrder);
-
-                $totalTaxable = 0;
-                $totalGst = 0;
-                $seenItemIds = [];
-                $billableLines = 0;
-
-                foreach ($validated['items'] as $itemData) {
-                    if (in_array((int) $itemData['id'], $seenItemIds, true)) {
-                        throw new \Exception('Duplicate order item payload detected. Please refresh and retry.');
-                    }
-                    $seenItemIds[] = (int) $itemData['id'];
-
-                    $item = $lockedOrder->items->firstWhere('id', $itemData['id']);
-                    if (!$item) {
-                        throw new \Exception('One or more order items are invalid for this order.');
-                    }
-
-                    $approvedQty = (float) $itemData['approved_qty'];
-                    $freeQty = (float) ($itemData['free_qty'] ?? 0);
-                    $batchNo = isset($itemData['batch_no']) ? trim((string) $itemData['batch_no']) : '';
-                    $requiredQty = $approvedQty + $freeQty;
-
-                    if ($approvedQty < 0 || $freeQty < 0) {
-                        throw new \Exception("Quantity cannot be negative for Product {$item->product->product_name}.");
-                    }
-
-                    if ($requiredQty > 0) {
-                        $billableLines++;
-                    }
-
-                    if ($requiredQty > 0 && $batchNo === '') {
-                        throw new \Exception("Batch is required for Product {$item->product->product_name}.");
-                    }
-                    
-                    // Verify HO warehouse has enough stock for the approved batch!
-                    if ($requiredQty > 0 && !$this->inventoryService->hasSufficientStock($item->product_id, $batchNo, 'warehouse', 0, $requiredQty)) {
-                        throw new \Exception("Insufficient stock in warehouse for Product {$item->product->product_name}, Batch {$batchNo}. Required: {$requiredQty}.");
-                    }
-
-                    $rate = (float) $itemData['rate'];
-                    $discountPercent = (float) ($itemData['discount_percent'] ?? 0);
-                    $taxableAmount = ($approvedQty * $rate) * (1 - ($discountPercent / 100));
-                    $gstAmount = $taxableAmount * ($item->gst_percent / 100);
-
-                    $item->update([
-                        'batch_no' => $requiredQty > 0 ? $batchNo : null,
-                        'approved_qty' => $approvedQty,
-                        'free_qty' => $freeQty,
-                        'rate' => $rate,
-                        'discount_percent' => $discountPercent,
-                        'taxable_amount' => $taxableAmount,
-                        'gst_amount' => $gstAmount,
-                        'total_amount' => $taxableAmount + $gstAmount
-                    ]);
-
-                    $totalTaxable += $taxableAmount;
-                    $totalGst += $gstAmount;
-                }
-
-                if ($billableLines === 0) {
-                    throw new \Exception('At least one line must have approved or free quantity before accepting the order.');
-                }
-
-                $totalAmount = $totalTaxable + $totalGst;
-                $roundOff = round($totalAmount) - $totalAmount;
-
-                // 2. Lock the Order Header Status
-                $lockedOrder->update([
-                    'status' => 'accepted',
-                    'subtotal' => $totalTaxable,
-                    'total_amount' => round($totalAmount + $roundOff, 2),
-                    'round_off' => $roundOff,
-                    'accepted_by' => $request->user()->id,
-                    'accepted_at' => now()
-                ]);
-
-                // 4. Trigger the recursive Commission Service Engine!
-                $this->commissionService->generateCommissionsForOrder($lockedOrder);
-                
-                // Track total commission generated directly onto the order
-                $lockedOrder->update(['total_commission' => $lockedOrder->commissions()->sum('gross_commission')]);
-
-                $this->clearOrderLock($lockedOrder);
-            });
-
-            return back()->with('success', 'Order accepted successfully. Batches allocated. Ready for Dispatch.');
+            return back()->with('success', 'Order commercially approved. Continue to warehouse allocation.');
 
         } catch (\Exception $e) {
             return back()->with('error', $e->getMessage());
@@ -552,57 +417,29 @@ class DistOrderController extends Controller
         ]);
 
         try {
-            DB::transaction(function () use ($distOrder, $validated, $request) {
-                $lockedOrder = DistOrder::whereKey($distOrder->id)
-                    ->lockForUpdate()
-                    ->with(['items', 'franchisee'])
-                    ->firstOrFail();
-
-                if ($lockedOrder->status !== 'accepted') {
-                    throw new \Exception('Only accepted orders can be dispatched.');
-                }
-
-                $this->assertOrderLockOwnership($request->user(), $lockedOrder);
-
-                // 1. Deduct from HO and Increment Franchisee via Unified Ledger!!
-                foreach ($lockedOrder->items as $item) {
-                    // This generates exactly two rows in inventory_ledgers (one OUT, one IN). IMMUTABLE.
-                    $this->inventoryService->recordDispatch([
-                        'product_id' => $item->product_id,
-                        'batch_no' => $item->batch_no,
-                        'franchisee_id' => $lockedOrder->franchisee_id,
-                        'qty' => $item->approved_qty + $item->free_qty,
-                        'rate' => $item->rate,
-                        'order_id' => $lockedOrder->id,
-                        'created_by' => $request->user()->id
-                    ]);
-                }
-
-                // 2. Financial Ledger Entry: Debit the Franchisee for the total amount of this B2B Order
-                $this->ledgerService->recordEntry(
-                    ledgerable: $lockedOrder->franchisee,
-                    transactionType: 'PURCHASE',
-                    debit: $lockedOrder->total_amount,
-                    credit: 0,
-                    reference: $lockedOrder,
-                    paymentMode: 'CREDIT',
-                    narration: "B2B Stock Purchase - Invoice {$lockedOrder->invoice_number} / Order {$lockedOrder->order_number}"
-                );
-
-                // 3. Update Header
-                $lockedOrder->update(array_merge($validated, [
-                    'status' => 'dispatched',
-                    'dispatched_by' => $request->user()->id,
-                    'dispatched_at' => now(),
-                ]));
-
-                $this->clearOrderLock($lockedOrder);
-                
-                // Future Implementation: Send Email Notification via queue (legacy logic: dispatch@genericplus...)
-            });
+            $this->distOrderDispatchService->dispatch($distOrder, $request->user(), $validated);
 
             return back()->with('success', 'Order dispatched successfully. Stock immediately transferred to Franchisee.');
 
+        } catch (\Exception $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+
+    public function allocate(Request $request, DistOrder $distOrder)
+    {
+        $this->assertCanMutateOrder($request->user());
+
+        $validated = $request->validate([
+            'items' => 'required|array',
+            'items.*.id' => 'required|exists:dist_order_items,id',
+            'items.*.batch_no' => 'nullable|string|max:50',
+        ]);
+
+        try {
+            $this->distOrderAllocationService->allocate($distOrder, $request->user(), $validated['items']);
+
+            return back()->with('success', 'Batch allocation locked. The order is now ready for dispatch.');
         } catch (\Exception $e) {
             return back()->with('error', $e->getMessage());
         }
@@ -617,30 +454,7 @@ class DistOrderController extends Controller
         ]);
 
         try {
-            DB::transaction(function () use ($distOrder, $validated, $request) {
-                $lockedOrder = DistOrder::whereKey($distOrder->id)
-                    ->lockForUpdate()
-                    ->firstOrFail();
-
-                if (in_array($lockedOrder->status, ['dispatched', 'delivered', 'cancelled'], true)) {
-                    throw new \Exception('Cannot reject an order in this status.');
-                }
-
-                $this->assertOrderLockOwnership($request->user(), $lockedOrder);
-
-                // Since stock moves only on dispatch, accepted rejection requires only commission cleanup.
-                if ($lockedOrder->status === 'accepted') {
-                    $lockedOrder->commissions()->delete();
-                    $lockedOrder->update(['total_commission' => 0]);
-                }
-
-                $lockedOrder->update([
-                    'status' => 'rejected',
-                    'rejection_reason' => $validated['rejection_reason']
-                ]);
-
-                $this->clearOrderLock($lockedOrder);
-            });
+            $this->distOrderReviewService->reject($distOrder, $request->user(), $validated['rejection_reason']);
         } catch (\Exception $e) {
             return back()->with('error', $e->getMessage());
         }
@@ -650,7 +464,9 @@ class DistOrderController extends Controller
 
     private function ensureOrderVisibleToUser($user, DistOrder $distOrder): void
     {
-        if ($user->franchisee_id && $distOrder->franchisee_id !== $user->franchisee_id) {
+        $franchiseeId = $user->getEffectiveFranchiseeId();
+
+        if ($franchiseeId && $distOrder->franchisee_id !== $franchiseeId) {
             abort(404);
         }
     }
@@ -664,8 +480,10 @@ class DistOrderController extends Controller
 
     private function canSubmitPayment($user, DistOrder $distOrder): bool
     {
-        return (bool) $user->franchisee_id
-            && $distOrder->franchisee_id === $user->franchisee_id
+        $franchiseeId = $user->getEffectiveFranchiseeId();
+
+        return (bool) $franchiseeId
+            && $distOrder->franchisee_id === $franchiseeId
             && in_array($distOrder->status, ['dispatched', 'delivered'], true);
     }
 
@@ -676,11 +494,13 @@ class DistOrderController extends Controller
 
     private function canReorderRejectedOrder($user, DistOrder $distOrder): bool
     {
-        if (!$user->franchisee_id) {
+        $franchiseeId = $user->getEffectiveFranchiseeId();
+
+        if (!$franchiseeId) {
             return false;
         }
 
-        return $distOrder->franchisee_id === $user->franchisee_id
+        return $distOrder->franchisee_id === $franchiseeId
             && in_array($distOrder->status, ['rejected', 'cancelled'], true);
     }
 
@@ -691,7 +511,7 @@ class DistOrderController extends Controller
 
     private function assertCanMutateOrder($user): void
     {
-        if ($user->franchisee_id) {
+        if ($user->getEffectiveFranchiseeId()) {
             abort(403, 'Franchisee users cannot modify distribution orders.');
         }
     }
@@ -772,7 +592,7 @@ class DistOrderController extends Controller
 
     private function shouldEnforceOrderLock(DistOrder $distOrder): bool
     {
-        return in_array($distOrder->status, ['pending', 'accepted'], true);
+        return in_array($distOrder->status, ['pending', 'accepted', 'allocated'], true);
     }
 
     private function isOrderLockExpired($lockedAt): bool
@@ -786,22 +606,7 @@ class DistOrderController extends Controller
 
     private function canForceUnlock($user): bool
     {
-        return !$user->franchisee_id;
-    }
-
-    private function assertOrderLockOwnership($user, DistOrder $distOrder): void
-    {
-        if (!$this->shouldEnforceOrderLock($distOrder)) {
-            return;
-        }
-
-        $ownerId = (int) ($distOrder->locked_by ?? 0);
-        if ($ownerId === 0 || $ownerId === (int) $user->id || $this->isOrderLockExpired($distOrder->locked_at)) {
-            return;
-        }
-
-        $lockedByName = User::query()->whereKey($ownerId)->value('name') ?? 'another user';
-        throw new \Exception("Order is currently being edited by {$lockedByName}. Please try after lock timeout or force unlock.");
+        return !$user->getEffectiveFranchiseeId();
     }
 
     private function clearOrderLock(DistOrder $distOrder): void

@@ -75,6 +75,8 @@ class FranchiseRegistrationController extends Controller
             'provisionRoute' => 'admin.franchises.provision-owner',
             'contextMode' => 'queue',
             'allowEdit' => false,
+            'allowApproval' => true,
+            'allowLifecycleActions' => false,
             'allowProvision' => false,
         ]);
     }

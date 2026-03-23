@@ -4,7 +4,7 @@ import Pagination from '@/Components/Pagination.vue';
 import { Head, Link, router } from '@inertiajs/vue3';
 import { ref, watch } from 'vue';
 import {
-    MagnifyingGlassIcon, PlusIcon, ArrowUturnLeftIcon, EyeIcon
+    MagnifyingGlassIcon, PlusIcon, ArrowUturnLeftIcon, EyeIcon, ArrowDownTrayIcon
 } from '@heroicons/vue/24/outline';
 
 const props = defineProps({
@@ -54,13 +54,27 @@ const statusColors = {
                         Purchase Returns (Debit Note)
                     </h2>
                 </div>
-                <Link
-                    :href="route('admin.purchase-returns.create')"
-                    class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-all duration-200"
-                >
-                    <PlusIcon class="h-5 w-5" />
-                    New Return
-                </Link>
+                <div class="flex items-center gap-3">
+                    <a :href="route('admin.purchase-returns.export', { search, status: statusFilter, supplier_id: supplierFilter, format: 'csv' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500 transition-all duration-200">
+                        <ArrowDownTrayIcon class="h-4 w-4" /> CSV
+                    </a>
+                    <a :href="route('admin.purchase-returns.export', { search, status: statusFilter, supplier_id: supplierFilter, format: 'excel' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 transition-all duration-200">
+                        <ArrowDownTrayIcon class="h-4 w-4" /> Excel
+                    </a>
+                    <a :href="route('admin.purchase-returns.export', { search, status: statusFilter, supplier_id: supplierFilter, format: 'pdf' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-600 transition-all duration-200">
+                        <ArrowDownTrayIcon class="h-4 w-4" /> PDF
+                    </a>
+                    <Link
+                        :href="route('admin.purchase-returns.create')"
+                        class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-all duration-200"
+                    >
+                        <PlusIcon class="h-5 w-5" />
+                        New Return
+                    </Link>
+                </div>
             </div>
         </template>
 

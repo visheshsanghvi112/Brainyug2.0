@@ -173,7 +173,7 @@ class RolesAndPermissionsSeeder extends Seeder
                 'reports_sales',
                 'reports_bi',
                 'reports_commissions',
-            ], ['view', 'update']),
+            ], ['view', 'create', 'update', 'delete']),
         ];
 
         $rolePermissions = [
@@ -192,7 +192,7 @@ class RolesAndPermissionsSeeder extends Seeder
             'Franchisee' => ['view products', 'view inventory', 'manage stock', 'place orders', 'view orders', 'create sale', 'view sales', 'process returns', 'view finance', 'view reports'],
             'Distributer' => ['view products', 'manage inventory', 'manage orders', 'approve orders', 'dispatch orders', 'view orders', 'view finance', 'view reports', 'export reports'],
             'Account' => ['view finance', 'process payments', 'view reports', 'export reports', 'view gst reports'],
-            'Sales Team' => ['view products', 'view franchisees', 'view orders', 'view sales'],
+            'Sales Team' => ['view products', 'view franchisees', 'view orders', 'view sales', 'manage orders', 'approve orders', 'dispatch orders', 'place orders'],
         ];
 
         foreach ($rolePermissions as $roleName => $permissionsForRole) {

@@ -25,6 +25,7 @@ import {
     ArrowUturnLeftIcon,
     ArrowUturnRightIcon,
     DocumentTextIcon,
+    MegaphoneIcon,
     CurrencyRupeeIcon,
     WalletIcon,
     CreditCardIcon,
@@ -143,6 +144,7 @@ const navigation = computed(() => {
         // Communication
         { name: 'Support Tickets', href: route('tickets.index'), icon: DocumentTextIcon, current: route().current('tickets.*'), show: hasModuleAccess('tickets'), category: 'Communication' },
         { name: 'Meetings', href: route('meetings.index'), icon: ChartBarSquareIcon, current: route().current('meetings.*'), show: hasModuleAccess('meetings'), category: 'Communication' },
+        { name: 'Notice Board', href: route('announcements.index'), icon: MegaphoneIcon, current: route().current('announcements.*'), show: hasModuleAccess('meetings'), category: 'Communication' },
         { name: 'Shop Visit Audits', href: route('shop-visits.index'), icon: ClipboardDocumentCheckIcon, current: route().current('shop-visits.*'), show: hasModuleAccess('shop_visits'), category: 'Communication' },
 
         // Accounts

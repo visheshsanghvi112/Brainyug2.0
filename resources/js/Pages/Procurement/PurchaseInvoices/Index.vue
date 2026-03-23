@@ -5,7 +5,7 @@ import { Head, Link, router } from '@inertiajs/vue3';
 import { ref, watch } from 'vue';
 import {
     MagnifyingGlassIcon, PlusIcon, DocumentTextIcon, CheckCircleIcon,
-    XCircleIcon, EyeIcon, ArrowDownTrayIcon
+    XCircleIcon, EyeIcon, ArrowDownTrayIcon, PencilSquareIcon
 } from '@heroicons/vue/24/outline';
 
 const props = defineProps({
@@ -48,6 +48,7 @@ const statusColors = {
 const orderStatusColors = {
     pending: 'bg-amber-100 text-amber-800 border-amber-200',
     accepted: 'bg-blue-100 text-blue-800 border-blue-200',
+    allocated: 'bg-cyan-100 text-cyan-800 border-cyan-200',
     dispatched: 'bg-indigo-100 text-indigo-800 border-indigo-200',
 };
 
@@ -72,9 +73,17 @@ function formatCurrency(amount) {
                     </h2>
                 </div>
                 <div class="flex items-center gap-3">
-                    <a :href="route('admin.purchase-invoices.export', { search, status: statusFilter, supplier_id: supplierFilter })"
+                    <a :href="route('admin.purchase-invoices.export', { search, status: statusFilter, supplier_id: supplierFilter, format: 'csv' })"
                         class="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500 transition-all duration-200">
-                        <ArrowDownTrayIcon class="h-4 w-4" /> Export CSV
+                        <ArrowDownTrayIcon class="h-4 w-4" /> CSV
+                    </a>
+                    <a :href="route('admin.purchase-invoices.export', { search, status: statusFilter, supplier_id: supplierFilter, format: 'excel' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 transition-all duration-200">
+                        <ArrowDownTrayIcon class="h-4 w-4" /> Excel
+                    </a>
+                    <a :href="route('admin.purchase-invoices.export', { search, status: statusFilter, supplier_id: supplierFilter, format: 'pdf' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-600 transition-all duration-200">
+                        <ArrowDownTrayIcon class="h-4 w-4" /> PDF
                     </a>
                     <Link
                         :href="route('admin.purchase-invoices.create')"
@@ -133,7 +142,7 @@ function formatCurrency(amount) {
                         </Link>
                     </div>
 
-                    <div class="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+                    <div class="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
                         <Link
                             :href="route('admin.dist-orders.index', { queue: 'pending_orders' })"
                             class="rounded-lg border border-amber-200 bg-amber-50 p-3"
@@ -142,11 +151,18 @@ function formatCurrency(amount) {
                             <div class="mt-1 text-xl font-black text-amber-800">{{ orderOpsMetrics?.pending_orders ?? 0 }}</div>
                         </Link>
                         <Link
-                            :href="route('admin.dist-orders.index', { queue: 'pending_dispatch' })"
-                            class="rounded-lg border border-blue-200 bg-blue-50 p-3"
+                            :href="route('admin.dist-orders.index', { queue: 'pending_allocation' })"
+                            class="rounded-lg border border-sky-200 bg-sky-50 p-3"
                         >
-                            <div class="text-[11px] font-semibold uppercase tracking-wide text-blue-700">Pending Dispatch</div>
-                            <div class="mt-1 text-xl font-black text-blue-800">{{ orderOpsMetrics?.pending_dispatch ?? 0 }}</div>
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Pending Allocation</div>
+                            <div class="mt-1 text-xl font-black text-sky-800">{{ orderOpsMetrics?.pending_allocation ?? 0 }}</div>
+                        </Link>
+                        <Link
+                            :href="route('admin.dist-orders.index', { queue: 'pending_dispatch' })"
+                            class="rounded-lg border border-cyan-200 bg-cyan-50 p-3"
+                        >
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-cyan-700">Pending Dispatch</div>
+                            <div class="mt-1 text-xl font-black text-cyan-800">{{ orderOpsMetrics?.pending_dispatch ?? 0 }}</div>
                         </Link>
                         <Link
                             :href="route('admin.dist-orders.index', { status: 'dispatched' })"
@@ -237,12 +253,21 @@ function formatCurrency(amount) {
                                     </span>
                                 </td>
                                 <td class="whitespace-nowrap px-6 py-4 text-center">
-                                    <Link
-                                        :href="route('admin.purchase-invoices.show', inv.id)"
-                                        class="inline-flex items-center rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-blue-600 dark:hover:bg-gray-700 dark:hover:text-blue-400 transition"
-                                    >
-                                        <EyeIcon class="h-5 w-5" />
-                                    </Link>
+                                    <div class="inline-flex items-center gap-2">
+                                        <Link
+                                            :href="route('admin.purchase-invoices.show', inv.id)"
+                                            class="inline-flex items-center rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-blue-600 dark:hover:bg-gray-700 dark:hover:text-blue-400 transition"
+                                        >
+                                            <EyeIcon class="h-5 w-5" />
+                                        </Link>
+                                        <Link
+                                            v-if="inv.status === 'draft'"
+                                            :href="route('admin.purchase-invoices.edit', inv.id)"
+                                            class="inline-flex items-center rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-indigo-600 dark:hover:bg-gray-700 dark:hover:text-indigo-400 transition"
+                                        >
+                                            <PencilSquareIcon class="h-5 w-5" />
+                                        </Link>
+                                    </div>
                                 </td>
                             </tr>
                         </tbody>

@@ -19,6 +19,7 @@ use App\Models\Supplier;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Inertia\Testing\AssertableInertia;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -139,6 +140,395 @@ class PurchaseReturnControllerTest extends TestCase
         $this->assertSame(6.0, (float) $return->sgst_amount);
         $this->assertSame(6.0, (float) $return->cgst_amount);
         $this->assertSame(112.0, (float) $return->total_amount);
+    }
+
+    public function test_create_page_prefills_purchase_return_from_approved_invoice(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Prefill Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Prefill Product',
+            'sku' => 'RET-PREFILL-001',
+            'mrp' => 160,
+            'is_active' => true,
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-2025-26-0105',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 500,
+            'discount_amount' => 0,
+            'sgst_amount' => 30,
+            'cgst_amount' => 30,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 560,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'RET-PREFILL-BATCH',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'mfg_date' => now()->subMonths(2)->toDateString(),
+            'qty' => 5,
+            'free_qty' => 1,
+            'unit' => 'pcs',
+            'mrp' => 160,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 72,
+            'hsn_id' => $support['hsn']->id,
+            'taxable_amount' => 600,
+            'total_amount' => 672,
+        ]);
+
+        $approvedReturn = PurchaseReturn::create([
+            'return_number' => 'PR-2025-26-0008',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 200,
+            'sgst_amount' => 12,
+            'cgst_amount' => 12,
+            'igst_amount' => 0,
+            'total_amount' => 224,
+            'status' => 'approved',
+            'reason' => 'Earlier return',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+        ]);
+
+        $approvedReturn->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'RET-PREFILL-BATCH',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'qty' => 2,
+            'rate' => 100,
+            'gst_percent' => 12,
+            'gst_amount' => 24,
+            'total_amount' => 224,
+        ]);
+
+        $this->actingAs($user)
+            ->get(route('admin.purchase-returns.create', ['purchase_invoice_id' => $invoice->id]))
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('Procurement/PurchaseReturns/CreateEdit')
+                ->where('prefillInvoice.id', $invoice->id)
+                ->where('prefillInvoice.supplier_id', $supplier->id)
+                ->where('prefillInvoice.invoice_number', 'PI-2025-26-0105')
+                ->where('prefillInvoice.items.0.batch_no', 'RET-PREFILL-BATCH')
+                ->where('prefillInvoice.items.0.rate', 100)
+                ->where('prefillInvoice.items.0.gst_percent', 12)
+                ->where('prefillInvoice.items.0.max_qty', 4)
+                ->where('prefillInvoice.items.0.qty', 4)
+            );
+    }
+
+    public function test_purchase_return_export_supports_pdf_download(): void
+    {
+        $user = $this->makeSuperAdminUser();
+
+        $supplier = Supplier::create([
+            'name' => 'Return Export Supplier',
+            'is_active' => true,
+        ]);
+
+        PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0999',
+            'supplier_id' => $supplier->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'total_amount' => 112,
+            'status' => 'draft',
+            'created_by' => $user->id,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->get(route('admin.purchase-returns.export', ['format' => 'pdf']));
+
+        $response->assertOk();
+        $this->assertStringContainsString('.pdf', (string) $response->headers->get('content-disposition'));
+    }
+
+    public function test_create_page_redirects_when_invoice_is_already_fully_returned(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Fully Returned Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Fully Returned Product',
+            'sku' => 'RET-FULL-001',
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0113',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 200,
+            'discount_amount' => 0,
+            'sgst_amount' => 12,
+            'cgst_amount' => 12,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 224,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'FULL-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'mfg_date' => now()->subMonths(2)->toDateString(),
+            'qty' => 2,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 120,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 24,
+            'taxable_amount' => 200,
+            'total_amount' => 224,
+        ]);
+
+        $purchaseReturn = PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0113',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 200,
+            'sgst_amount' => 12,
+            'cgst_amount' => 12,
+            'igst_amount' => 0,
+            'total_amount' => 224,
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+        ]);
+
+        $purchaseReturn->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'FULL-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'qty' => 2,
+            'rate' => 100,
+            'gst_percent' => 12,
+            'gst_amount' => 24,
+            'total_amount' => 224,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->get(route('admin.purchase-returns.create', ['purchase_invoice_id' => $invoice->id]));
+
+        $response->assertRedirect(route('admin.purchase-invoices.show', $invoice->id));
+        $response->assertSessionHas('error');
+    }
+
+    public function test_store_rejects_linking_purchase_return_to_non_approved_invoice(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Draft Source Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Draft Source Product',
+            'sku' => 'RET-DRAFT-001',
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0111',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'discount_amount' => 0,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 112,
+            'tax_type' => 'intra_state',
+            'status' => 'draft',
+            'created_by' => $user->id,
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'DRAFT-BATCH-1',
+            'expiry_date' => now()->addMonths(12)->toDateString(),
+            'qty' => 1,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 100,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 12,
+            'taxable_amount' => 100,
+            'total_amount' => 112,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->from(route('admin.purchase-returns.create'))
+            ->post(route('admin.purchase-returns.store'), [
+                'supplier_id' => $supplier->id,
+                'purchase_invoice_id' => $invoice->id,
+                'return_date' => now()->toDateString(),
+                'items' => [[
+                    'product_id' => $product->id,
+                    'batch_no' => 'DRAFT-BATCH-1',
+                    'expiry_date' => now()->addMonths(12)->toDateString(),
+                    'qty' => 1,
+                    'rate' => 100,
+                    'gst_percent' => 12,
+                ]],
+            ]);
+
+        $response->assertRedirect(route('admin.purchase-returns.create'));
+        $response->assertSessionHasErrors('purchase_invoice_id');
+        $this->assertDatabaseCount('purchase_returns', 0);
+    }
+
+    public function test_approve_rejects_when_linked_invoice_is_no_longer_approved(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Approval Guard Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Approval Guard Product',
+            'sku' => 'RET-APPROVE-001',
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0112',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'discount_amount' => 0,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 112,
+            'tax_type' => 'intra_state',
+            'status' => 'cancelled',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'APPROVE-BATCH-1',
+            'expiry_date' => now()->addMonths(12)->toDateString(),
+            'qty' => 2,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 100,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 24,
+            'taxable_amount' => 200,
+            'total_amount' => 224,
+        ]);
+
+        InventoryLedger::create([
+            'product_id' => $product->id,
+            'batch_no' => 'APPROVE-BATCH-1',
+            'expiry_date' => now()->addMonths(12)->toDateString(),
+            'mrp' => 100,
+            'location_type' => 'warehouse',
+            'location_id' => 0,
+            'transaction_type' => 'PURCHASE',
+            'reference_type' => 'purchase_invoice',
+            'reference_id' => $invoice->id,
+            'qty_in' => 2,
+            'qty_out' => 0,
+            'rate' => 100,
+            'created_by' => $user->id,
+        ]);
+
+        $purchaseReturn = PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0012',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'total_amount' => 112,
+            'status' => 'draft',
+            'created_by' => $user->id,
+        ]);
+
+        $purchaseReturn->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'APPROVE-BATCH-1',
+            'expiry_date' => now()->addMonths(12)->toDateString(),
+            'qty' => 1,
+            'rate' => 100,
+            'gst_percent' => 12,
+            'gst_amount' => 12,
+            'total_amount' => 112,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->from(route('admin.purchase-returns.show', $purchaseReturn->id))
+            ->post(route('admin.purchase-returns.approve', $purchaseReturn->id));
+
+        $response->assertRedirect(route('admin.purchase-returns.show', $purchaseReturn->id));
+        $response->assertSessionHasErrors('purchase_invoice_id');
+
+        $purchaseReturn->refresh();
+        $this->assertSame('draft', $purchaseReturn->status);
     }
 
     private function makeSuperAdminUser(): User

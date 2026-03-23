@@ -314,6 +314,7 @@ class UserController extends Controller
     public function destroy(User $user)
     {
         $actor = auth()->user();
+        /** @var User|null $actor */
 
         if ($user->id === auth()->id()) {
             return redirect()->back()->with('error', 'You cannot delete your own account.');
@@ -331,7 +332,7 @@ class UserController extends Controller
             $user->delete();
             DB::commit();
 
-            if ($actor) {
+            if ($actor instanceof User) {
                 AccessChangeAudit::record(
                     actor: $actor,
                     targetUserId: $deletedUserId,
