@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Admin;
 
+use Barryvdh\DomPDF\Facade\Pdf;
 use App\Http\Controllers\Controller;
 use App\Models\Product;
 use App\Models\CompanyMaster;
@@ -15,6 +16,7 @@ use App\Http\Resources\ProductResource;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -31,7 +33,9 @@ class ProductController extends Controller
 {
     public function index(Request $request)
     {
-        $products = $this->filteredProductQuery($request)
+        $baseQuery = $this->filteredProductQuery($request)->reorder();
+
+        $products = (clone $baseQuery)
             ->reorder()
             ->latest()
             ->paginate(50)
@@ -40,6 +44,12 @@ class ProductController extends Controller
         return Inertia::render('Master/Products/Index', [
             'products'   => ProductResource::collection($products),
             'filters'    => $request->only(['search', 'category', 'company', 'status']),
+            'summary'    => [
+                'total_products' => (clone $baseQuery)->count(),
+                'active_products' => (clone $baseQuery)->where('is_active', true)->count(),
+                'inactive_products' => (clone $baseQuery)->where('is_active', false)->count(),
+                'companies_covered' => (clone $baseQuery)->whereNotNull('company_id')->distinct('company_id')->count('company_id'),
+            ],
             'categories' => ItemCategory::orderBy('name')->get(['id', 'name']),
             'companies'  => CompanyMaster::orderBy('name')->get(['id', 'name']),
         ]);
@@ -259,6 +269,100 @@ class ProductController extends Controller
     public function exportExcel(Request $request)
     {
         $products = $this->filteredProductExportQuery($request)->get();
+        $options = $this->productExportOptions($request);
+        $dataset = $this->buildProductExportDataset($products, $request, $options);
+
+        $spreadsheet = new Spreadsheet();
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Product Catalog');
+
+        $lastColumn = $this->spreadsheetColumnName(count($dataset['headers']));
+
+        $sheet->mergeCells("A1:{$lastColumn}1");
+        $sheet->setCellValue('A1', 'Product Catalog');
+        $sheet->mergeCells("A2:{$lastColumn}2");
+        $sheet->setCellValue('A2', $dataset['subtitle']);
+
+        $sheet->getStyle("A1:{$lastColumn}1")->applyFromArray([
+            'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF'], 'size' => 16],
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => '1F4E79']],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+        ]);
+        $sheet->getStyle("A2:{$lastColumn}2")->applyFromArray([
+            'font' => ['italic' => true, 'color' => ['rgb' => '475569'], 'size' => 10],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
+        ]);
+
+        $metaRow = 4;
+        foreach ($dataset['meta'] as $label => $value) {
+            $sheet->setCellValue([1, $metaRow], $label);
+            $sheet->setCellValue([2, $metaRow], $value);
+            $sheet->getStyle("A{$metaRow}")->getFont()->setBold(true);
+            $metaRow++;
+        }
+
+        $headerRow = $metaRow + 1;
+        foreach ($dataset['headers'] as $colIdx => $header) {
+            $sheet->setCellValue([$colIdx + 1, $headerRow], $header);
+        }
+
+        $sheet->getStyle("A{$headerRow}:{$lastColumn}{$headerRow}")->applyFromArray([
+            'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF'], 'size' => 11],
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => '0F766E']],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+            'borders' => ['allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['rgb' => 'CBD5E1']]],
+        ]);
+
+        $row = $headerRow + 1;
+        foreach ($dataset['rows'] as $idx => $exportRow) {
+            foreach (array_values($exportRow) as $colIdx => $value) {
+                $sheet->setCellValue([$colIdx + 1, $row], $value);
+            }
+
+            if ($idx % 2 === 1) {
+                $sheet->getStyle("A{$row}:{$lastColumn}{$row}")
+                    ->getFill()
+                    ->setFillType(Fill::FILL_SOLID)
+                    ->getStartColor()
+                    ->setRGB('F8FAFC');
+            }
+
+            $row++;
+        }
+
+        $lastDataRow = $row - 1;
+        if ($lastDataRow >= $headerRow + 1) {
+            $sheet->getStyle("A{$headerRow}:{$lastColumn}{$lastDataRow}")
+                ->getBorders()
+                ->getAllBorders()
+                ->setBorderStyle(Border::BORDER_THIN)
+                ->getColor()
+                ->setRGB('E2E8F0');
+
+            foreach ($dataset['numeric_columns'] as $columnIndex) {
+                $column = $this->spreadsheetColumnName($columnIndex);
+                $sheet->getStyle("{$column}" . ($headerRow + 1) . ":{$column}{$lastDataRow}")
+                    ->getNumberFormat()
+                    ->setFormatCode('#,##0.00');
+            }
+
+            $sheet->setAutoFilter("A{$headerRow}:{$lastColumn}{$lastDataRow}");
+        }
+
+        foreach (range(1, count($dataset['headers'])) as $index) {
+            $sheet->getColumnDimension($this->spreadsheetColumnName($index))->setAutoSize(true);
+        }
+
+        $sheet->freezePane('A' . ($headerRow + 1));
+
+        $filename = 'ProductCatalog_' . now()->format('Y-m-d_His') . '.xlsx';
+        $temp = tempnam(sys_get_temp_dir(), 'export');
+        $writer = new Xlsx($spreadsheet);
+        $writer->save($temp);
+
+        return response()->download($temp, $filename, [
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ])->deleteFileAfterSend(true);
 
         $spreadsheet = new Spreadsheet();
         $sheet = $spreadsheet->getActiveSheet();
@@ -346,6 +450,26 @@ class ProductController extends Controller
     public function exportPdf(Request $request)
     {
         $products = $this->filteredProductExportQuery($request)->get();
+        $options = $this->productExportOptions($request);
+        $dataset = $this->buildProductExportDataset($products, $request, $options);
+
+        $viewData = [
+            'headers' => $dataset['headers'],
+            'rows' => $dataset['rows'],
+            'meta' => $dataset['meta'],
+            'generatedAt' => $dataset['generated_at'],
+            'subtitle' => $dataset['subtitle'],
+            'totalCount' => $products->count(),
+            'autoPrint' => false,
+        ];
+
+        if ($request->boolean('preview')) {
+            return response()->view('exports.products-pdf', $viewData);
+        }
+
+        $pdf = Pdf::loadView('exports.products-pdf', $viewData)->setPaper('a4', 'landscape');
+
+        return $pdf->download('ProductCatalog_' . now()->format('Y-m-d_His') . '.pdf');
 
         return response()->view('exports.products-pdf', [
             'products' => $products,
@@ -353,6 +477,180 @@ class ProductController extends Controller
             'totalCount' => $products->count(),
             'autoPrint' => true,
         ]);
+    }
+
+    private function productExportOptions(Request $request): array
+    {
+        $layout = in_array($request->input('layout'), ['compact', 'detailed'], true)
+            ? $request->input('layout')
+            : 'detailed';
+
+        return [
+            'layout' => $layout,
+            'include_barcode' => $request->boolean('include_barcode'),
+            'include_tax' => $request->boolean('include_tax', true),
+            'include_units' => $request->boolean('include_units', true),
+            'include_pricing' => $request->boolean('include_pricing', true),
+        ];
+    }
+
+    private function buildProductExportDataset(Collection $products, Request $request, array $options): array
+    {
+        $headers = [];
+        $numericColumns = [];
+
+        $pushHeader = function (string $label, bool $numeric = false) use (&$headers, &$numericColumns): void {
+            $headers[] = $label;
+
+            if ($numeric) {
+                $numericColumns[] = count($headers);
+            }
+        };
+
+        $pushHeader('SR');
+        $pushHeader('Product Name');
+        $pushHeader('SKU');
+
+        if ($options['layout'] === 'detailed') {
+            $pushHeader('Product Code');
+            $pushHeader('Salt / Content');
+        }
+
+        $pushHeader('Company');
+        $pushHeader('Category');
+
+        if ($options['include_barcode']) {
+            $pushHeader('Barcode');
+        }
+
+        if ($options['include_tax']) {
+            $pushHeader('HSN Code');
+            $pushHeader('GST %', true);
+        }
+
+        if ($options['include_units']) {
+            $pushHeader('Packing');
+            if ($options['layout'] === 'detailed') {
+                $pushHeader('Box Size');
+            }
+            $pushHeader('Unit');
+            if ($options['layout'] === 'detailed') {
+                $pushHeader('Secondary Unit');
+            }
+            $pushHeader('Conversion', true);
+        }
+
+        if ($options['include_pricing']) {
+            $pushHeader('MRP', true);
+            $pushHeader('PTR', true);
+            if ($options['layout'] === 'detailed') {
+                $pushHeader('PTS', true);
+                $pushHeader('Rate A', true);
+                $pushHeader('CSR', true);
+            }
+        }
+
+        $pushHeader('Status');
+
+        $rows = $products->values()->map(function (Product $product, int $idx) use ($options) {
+            $row = [
+                $idx + 1,
+                $product->product_name,
+                $product->sku,
+            ];
+
+            if ($options['layout'] === 'detailed') {
+                $row[] = $product->product_code ?: '-';
+                $row[] = $product->salt?->name ?? '-';
+            }
+
+            $row[] = $product->company?->name ?? '-';
+            $row[] = $product->category?->name ?? '-';
+
+            if ($options['include_barcode']) {
+                $row[] = $product->barcode ?: '-';
+            }
+
+            if ($options['include_tax']) {
+                $row[] = $product->hsn?->hsn_code ?? '-';
+                $row[] = $product->gstPercent();
+            }
+
+            if ($options['include_units']) {
+                $row[] = $product->packing_desc ?: '-';
+                if ($options['layout'] === 'detailed') {
+                    $row[] = $product->boxSize?->size_name ?? '-';
+                }
+                $row[] = $product->unit ?: '-';
+                if ($options['layout'] === 'detailed') {
+                    $row[] = $product->secondary_unit ?: '-';
+                }
+                $row[] = (float) ($product->conversion_factor ?? 0);
+            }
+
+            if ($options['include_pricing']) {
+                $row[] = (float) ($product->mrp ?? 0);
+                $row[] = (float) ($product->ptr ?? 0);
+                if ($options['layout'] === 'detailed') {
+                    $row[] = (float) ($product->pts ?? 0);
+                    $row[] = (float) ($product->rate_a ?? 0);
+                    $row[] = (float) ($product->csr ?? 0);
+                }
+            }
+
+            $row[] = $product->is_active ? 'Active' : 'Inactive';
+
+            return $row;
+        })->all();
+
+        $includedBlocks = collect([
+            $options['include_barcode'] ? 'Barcode' : null,
+            $options['include_tax'] ? 'Tax' : null,
+            $options['include_units'] ? 'Units' : null,
+            $options['include_pricing'] ? 'Pricing' : null,
+        ])->filter()->implode(', ');
+
+        return [
+            'headers' => $headers,
+            'rows' => $rows,
+            'numeric_columns' => $numericColumns,
+            'generated_at' => now()->format('d M Y, h:i A'),
+            'subtitle' => 'Filtered product register export for catalog governance and commercial review.',
+            'meta' => [
+                'Generated At' => now()->format('d M Y, h:i A'),
+                'Export Layout' => Str::headline($options['layout']),
+                'Total Products' => (string) $products->count(),
+                'Active Products' => (string) $products->where('is_active', true)->count(),
+                'Inactive Products' => (string) $products->where('is_active', false)->count(),
+                'Search Filter' => $request->filled('search') ? trim((string) $request->input('search')) : 'All products',
+                'Category Filter' => $request->filled('category')
+                    ? (ItemCategory::query()->whereKey($request->input('category'))->value('name') ?? 'Selected category')
+                    : 'All categories',
+                'Company Filter' => $request->filled('company')
+                    ? (CompanyMaster::query()->whereKey($request->input('company'))->value('name') ?? 'Selected company')
+                    : 'All companies',
+                'Status Filter' => match ((string) $request->input('status', '')) {
+                    '1' => 'Active only',
+                    '0' => 'Inactive only',
+                    default => 'All statuses',
+                },
+                'Included Blocks' => $includedBlocks !== '' ? $includedBlocks : 'Core catalog fields only',
+            ],
+        ];
+    }
+
+    private function spreadsheetColumnName(int $index): string
+    {
+        $index = max(1, $index);
+        $column = '';
+
+        while ($index > 0) {
+            $index--;
+            $column = chr(65 + ($index % 26)) . $column;
+            $index = intdiv($index, 26);
+        }
+
+        return $column;
     }
 
     /**

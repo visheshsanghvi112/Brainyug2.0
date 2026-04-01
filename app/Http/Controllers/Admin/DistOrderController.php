@@ -14,6 +14,7 @@ use App\Services\DistOrderPaymentService;
 use App\Services\DistOrderReviewService;
 use App\Services\DistOrderWorkflowService;
 use App\Services\InventoryService;
+use App\Services\ReportExportService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -29,40 +30,20 @@ class DistOrderController extends Controller
         private DistOrderReviewService $distOrderReviewService,
         private DistOrderAllocationService $distOrderAllocationService,
         private DistOrderDispatchService $distOrderDispatchService,
-        private DistOrderPaymentService $distOrderPaymentService
+        private DistOrderPaymentService $distOrderPaymentService,
+        private ReportExportService $reportExportService
     ) {}
 
     public function index(Request $request)
     {
         $user = $request->user();
-        $queue = $request->string('queue')->toString();
-
-        $applyVisibilityScope = function ($query) use ($user) {
-            $franchiseeId = $user->getEffectiveFranchiseeId();
-
-            $query->when($franchiseeId, fn ($q, $effectiveFranchiseeId) => $q->where('franchisee_id', $effectiveFranchiseeId));
-        };
-
         $baseQuery = DistOrder::query();
-        $applyVisibilityScope($baseQuery);
+        $this->applyOrderVisibilityScope($baseQuery, $user);
 
-        $orders = DistOrder::with(['franchisee', 'user'])
+        $orders = $this->buildIndexQuery($request, $user)
             ->withCount([
                 'payments as pending_payments_count' => fn ($q) => $q->where('status', 'pending'),
             ])
-            ->tap($applyVisibilityScope)
-            ->when($request->search, function ($q, $search) {
-                $q->where(function ($q2) use ($search) {
-                    $q2->where('order_number', 'like', "%{$search}%")
-                       ->orWhereHas('franchisee', fn ($f) => $f->where('shop_name', 'like', "%{$search}%"));
-                });
-            })
-            ->when($request->status, fn($q, $s) => $q->where('status', $s))
-            ->when($queue === 'pending_orders', fn ($q) => $q->where('status', 'pending'))
-            ->when($queue === 'pending_allocation', fn ($q) => $q->where('status', 'accepted'))
-            ->when($queue === 'pending_dispatch', fn ($q) => $q->where('status', 'allocated'))
-            ->when($queue === 'payment_review', fn ($q) => $q->whereHas('payments', fn ($p) => $p->where('status', 'pending')))
-            ->when($queue === 'open_work', fn ($q) => $q->whereIn('status', ['pending', 'accepted', 'allocated', 'dispatched']))
             ->orderByRaw("CASE status WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 WHEN 'allocated' THEN 2 WHEN 'dispatched' THEN 3 ELSE 4 END")
             ->latest('id')
             ->paginate(15)
@@ -81,6 +62,106 @@ class DistOrderController extends Controller
             'filters' => $request->only(['search', 'status', 'queue']),
             'metrics' => $metrics,
         ]);
+    }
+
+    public function export(Request $request)
+    {
+        $orders = $this->buildIndexQuery($request, $request->user())
+            ->with(['franchisee', 'user', 'items', 'payments'])
+            ->orderByRaw("CASE status WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 WHEN 'allocated' THEN 2 WHEN 'dispatched' THEN 3 ELSE 4 END")
+            ->latest('id')
+            ->get();
+
+        $headers = [
+            'Order No',
+            'Date',
+            'Franchisee',
+            'Raised By',
+            'Status',
+            'Items',
+            'Requested Qty',
+            'Approved Qty',
+            'Free Qty',
+            'Pending Payments',
+            'Outstanding',
+            'Total Amount',
+        ];
+
+        $rows = $orders->map(function (DistOrder $order) {
+            $payments = $order->payments;
+            $items = $order->items;
+            $confirmedPayments = round((float) $payments->where('status', 'confirmed')->sum('amount'), 2);
+
+            return [
+                $order->order_number,
+                optional($order->created_at)?->format('Y-m-d H:i'),
+                $order->franchisee?->shop_name ?? '',
+                $order->user?->name ?? '',
+                ucfirst((string) $order->status),
+                $items->count(),
+                round((float) $items->sum('request_qty'), 2),
+                round((float) $items->sum('approved_qty'), 2),
+                round((float) $items->sum('free_qty'), 2),
+                $payments->where('status', 'pending')->count(),
+                round(max(0, (float) $order->total_amount - $confirmedPayments), 2),
+                round((float) $order->total_amount, 2),
+            ];
+        })->all();
+
+        $summary = [
+            'Orders' => $orders->count(),
+            'Pending' => $orders->where('status', 'pending')->count(),
+            'Allocated' => $orders->where('status', 'allocated')->count(),
+            'Dispatched' => $orders->where('status', 'dispatched')->count(),
+            'Pending Payment Review' => $orders->filter(
+                fn (DistOrder $order) => $order->payments->where('status', 'pending')->isNotEmpty()
+            )->count(),
+            'Total Order Value' => round((float) $orders->sum('total_amount'), 2),
+        ];
+
+        $format = strtolower((string) $request->input('format', 'csv'));
+
+        if ($format === 'excel') {
+            return $this->reportExportService->downloadExcel(
+                fileBase: 'distribution_orders',
+                sheetTitle: 'Distribution Orders',
+                headers: $headers,
+                rows: $rows,
+                meta: $summary,
+            );
+        }
+
+        if ($format === 'pdf') {
+            return $this->reportExportService->downloadPdf(
+                fileBase: 'distribution_orders',
+                title: 'Distribution Orders',
+                headers: $headers,
+                rows: $rows,
+                meta: $summary,
+            );
+        }
+
+        $filename = 'distribution_orders_' . date('Y-m-d_H-i-s') . '.csv';
+        $responseHeaders = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename=$filename",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $callback = function () use ($rows, $headers) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $headers);
+
+            foreach ($rows as $row) {
+                fputcsv($file, $row);
+            }
+
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $responseHeaders);
     }
 
     public function show(Request $request, DistOrder $distOrder)
@@ -615,6 +696,33 @@ class DistOrderController extends Controller
             'locked_by' => null,
             'locked_at' => null,
         ]);
+    }
+
+    private function buildIndexQuery(Request $request, $user)
+    {
+        $queue = $request->string('queue')->toString();
+
+        return DistOrder::with(['franchisee', 'user'])
+            ->tap(fn ($query) => $this->applyOrderVisibilityScope($query, $user))
+            ->when($request->search, function ($query, $search) {
+                $query->where(function ($searchQuery) use ($search) {
+                    $searchQuery->where('order_number', 'like', "%{$search}%")
+                        ->orWhereHas('franchisee', fn ($franchiseeQuery) => $franchiseeQuery->where('shop_name', 'like', "%{$search}%"));
+                });
+            })
+            ->when($request->status, fn ($query, $status) => $query->where('status', $status))
+            ->when($queue === 'pending_orders', fn ($query) => $query->where('status', 'pending'))
+            ->when($queue === 'pending_allocation', fn ($query) => $query->where('status', 'accepted'))
+            ->when($queue === 'pending_dispatch', fn ($query) => $query->where('status', 'allocated'))
+            ->when($queue === 'payment_review', fn ($query) => $query->whereHas('payments', fn ($paymentQuery) => $paymentQuery->where('status', 'pending')))
+            ->when($queue === 'open_work', fn ($query) => $query->whereIn('status', ['pending', 'accepted', 'allocated', 'dispatched']));
+    }
+
+    private function applyOrderVisibilityScope($query, $user): void
+    {
+        $franchiseeId = $user->getEffectiveFranchiseeId();
+
+        $query->when($franchiseeId, fn ($scopedQuery, $effectiveFranchiseeId) => $scopedQuery->where('franchisee_id', $effectiveFranchiseeId));
     }
 
     private function calculateReorderFreeQty(float $qty): float

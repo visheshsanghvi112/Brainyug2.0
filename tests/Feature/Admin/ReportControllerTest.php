@@ -18,7 +18,9 @@ use App\Models\RackSection;
 use App\Models\SaltMaster;
 use App\Models\SalesInvoice;
 use App\Models\SalesInvoiceItem;
+use App\Models\Supplier;
 use App\Models\User;
+use App\Services\LedgerService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
@@ -263,6 +265,68 @@ class ReportControllerTest extends TestCase
         $this->assertStringContainsString('Product', $content);
         $this->assertStringContainsString('Growth Shop', $content);
         $this->assertStringContainsString('Growth Product', $content);
+    }
+
+    public function test_vendor_outstanding_report_excludes_reversed_supplier_payments_from_total_paid(): void
+    {
+        $admin = $this->makeAdminUser([
+            'module.reports_finance.view',
+            'view reports',
+        ]);
+
+        $supplier = Supplier::create([
+            'name' => 'Aging Supplier',
+            'code' => 'SUP-AGE-01',
+            'phone' => '9876543210',
+            'is_active' => true,
+        ]);
+
+        $invoice = \App\Models\PurchaseInvoice::create([
+            'invoice_number' => 'PINV-AGE-001',
+            'supplier_invoice_no' => 'SUP-AGE-INV-1',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->subDays(20)->toDateString(),
+            'received_date' => now()->subDays(20)->toDateString(),
+            'due_days' => 5,
+            'financial_year' => \App\Models\PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 1000,
+            'discount_amount' => 0,
+            'sgst_amount' => 0,
+            'cgst_amount' => 0,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 1000,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+        ]);
+
+        $ledgerService = app(LedgerService::class);
+        $ledgerService->recordEntry($supplier, 'PURCHASE', debit: 0, credit: 1000, reference: $invoice, paymentMode: 'credit', narration: 'Approved purchase invoice', transactionDate: $invoice->invoice_date);
+        $payment = $ledgerService->recordEntry($supplier, 'PAYMENT_MADE', debit: 400, credit: 0, reference: null, paymentMode: 'bank', narration: 'Original payment', transactionDate: now()->subDays(10)->toDateString());
+        $ledgerService->recordEntry($supplier, 'PAYMENT_REVERSAL', debit: 0, credit: 400, reference: null, paymentMode: 'adjustment', narration: 'Reversal of original payment', transactionDate: now()->subDays(2)->toDateString());
+        $payment->update([
+            'reversed_at' => now()->subDays(2),
+            'reversal_reason' => 'Wrong posting',
+        ]);
+
+        $this->actingAs($admin)
+            ->get(route('reports.finance.vendor-outstanding'))
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('Reports/Finance/VendorOutstanding')
+                ->where('rows.data.0.name', 'Aging Supplier')
+                ->where('rows.data.0.total_paid', 0)
+                ->where('rows.data.0.outstanding_balance', 1000)
+            );
+
+        $export = $this->actingAs($admin)
+            ->get(route('reports.finance.vendor-outstanding', ['format' => 'csv']));
+
+        $export->assertOk();
+        $this->assertStringContainsString('vendor_outstanding_', (string) $export->headers->get('content-disposition'));
+        $content = $export->streamedContent();
+        $this->assertStringContainsString('Aging Supplier', $content);
+        $this->assertStringContainsString('1000', $content);
     }
 
     private function makeAdminUser(array $permissions): User

@@ -9,7 +9,7 @@ use App\Models\PurchaseInvoice;
 use App\Models\Supplier;
 use App\Models\Product;
 use App\Services\InventoryService;
-use App\Services\LedgerService;
+use App\Services\PurchaseReturnLifecycleService;
 use App\Services\ReportExportService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -20,7 +20,7 @@ class PurchaseReturnController extends Controller
 {
     public function __construct(
         private InventoryService $inventoryService,
-        private LedgerService $ledgerService,
+        private PurchaseReturnLifecycleService $purchaseReturnLifecycleService,
         private ReportExportService $reportExportService
     ) {}
 
@@ -33,10 +33,35 @@ class PurchaseReturnController extends Controller
                        ->orWhereHas('supplier', fn($s) => $s->where('name', 'like', "%{$search}%"));
                 });
             })
-            ->when($request->status, fn($q, $s) => $q->where('status', $s))
+            ->when($request->status, function ($query, $status) {
+                if ($status === 'reversed') {
+                    $query->whereNotNull('reversed_at');
+                    return;
+                }
+
+                $query->where('status', $status)
+                    ->when($status === 'approved', fn ($approvedQuery) => $approvedQuery->whereNull('reversed_at'));
+            })
             ->when($request->supplier_id, fn($q, $s) => $q->where('supplier_id', $s))
             ->latest()
             ->paginate(15)
+            ->through(fn (PurchaseReturn $purchaseReturn) => [
+                'id' => $purchaseReturn->id,
+                'return_number' => $purchaseReturn->return_number,
+                'supplier_id' => $purchaseReturn->supplier_id,
+                'purchase_invoice_id' => $purchaseReturn->purchase_invoice_id,
+                'return_date' => optional($purchaseReturn->return_date)?->format('Y-m-d'),
+                'total_amount' => round((float) $purchaseReturn->total_amount, 2),
+                'status' => $purchaseReturn->workflow_status,
+                'supplier' => $purchaseReturn->supplier ? [
+                    'id' => $purchaseReturn->supplier->id,
+                    'name' => $purchaseReturn->supplier->name,
+                ] : null,
+                'purchase_invoice' => $purchaseReturn->purchaseInvoice ? [
+                    'id' => $purchaseReturn->purchaseInvoice->id,
+                    'invoice_number' => $purchaseReturn->purchaseInvoice->invoice_number,
+                ] : null,
+            ])
             ->withQueryString();
 
         return Inertia::render('Procurement/PurchaseReturns/Index', [
@@ -60,6 +85,7 @@ class PurchaseReturnController extends Controller
                 ->join('purchase_returns as pr', 'pr.id', '=', 'purchase_return_items.purchase_return_id')
                 ->where('pr.purchase_invoice_id', $invoice->id)
                 ->where('pr.status', 'approved')
+                ->whereNull('pr.reversed_at')
                 ->groupBy('purchase_return_items.product_id', 'purchase_return_items.batch_no')
                 ->get()
                 ->mapWithKeys(fn($row) => [
@@ -150,7 +176,7 @@ class PurchaseReturnController extends Controller
                 ])->withInput();
             }
 
-            $this->validateInvoiceLinkedReturnItems($linkedInvoice, $validated['items']);
+            $this->purchaseReturnLifecycleService->validateInvoiceLinkedReturnItems($linkedInvoice, $validated['items']);
         }
 
         DB::transaction(function () use ($validated, $request, $linkedInvoice) {
@@ -216,11 +242,6 @@ class PurchaseReturnController extends Controller
                 $lineTotal = $taxable + $gstAmt;
 
                 // Validate stock availability BEFORE allowing return
-                if (!$this->inventoryService->hasSufficientStock(
-                    $item['product_id'], $item['batch_no'], 'warehouse', 0, $qty
-                )) {
-                    throw new \Exception("Insufficient stock in warehouse for product ID {$item['product_id']}, batch {$item['batch_no']}. Cannot return {$qty}.");
-                }
 
                 $itemsData[] = array_merge($item, [
                     'rate' => round($rate, 4),
@@ -260,10 +281,15 @@ class PurchaseReturnController extends Controller
 
     public function show(PurchaseReturn $purchaseReturn)
     {
-        $purchaseReturn->load(['supplier', 'purchaseInvoice', 'items.product', 'createdBy', 'approvedBy']);
+        $purchaseReturn->load(['supplier', 'purchaseInvoice', 'items.product', 'createdBy', 'approvedBy', 'reversedBy']);
 
         return Inertia::render('Procurement/PurchaseReturns/Show', [
             'purchaseReturn' => $purchaseReturn,
+            'actions' => [
+                'can_approve' => $purchaseReturn->status === 'draft',
+                'can_cancel' => $purchaseReturn->status === 'draft',
+                'can_reverse' => $purchaseReturn->canReverse(),
+            ],
         ]);
     }
 
@@ -273,92 +299,7 @@ class PurchaseReturnController extends Controller
     public function approve(Request $request, PurchaseReturn $purchaseReturn)
     {
         try {
-            DB::transaction(function () use ($purchaseReturn, $request) {
-                $actor = $request->user();
-
-                $lockedReturn = PurchaseReturn::whereKey($purchaseReturn->id)
-                    ->lockForUpdate()
-                    ->with(['items', 'supplier', 'purchaseInvoice.items'])
-                    ->firstOrFail();
-
-                if ($lockedReturn->status !== 'draft') {
-                    throw ValidationException::withMessages([
-                        'status' => 'Only draft returns can be approved.',
-                    ]);
-                }
-
-                // Maker-checker: creator cannot approve own return unless Super Admin.
-                if ((int) $lockedReturn->created_by === (int) $actor->id && !$actor->isSuperAdmin()) {
-                    throw ValidationException::withMessages([
-                        'approval' => 'Maker-checker rule: the creator cannot approve this return. Ask another authorized user to approve.',
-                    ]);
-                }
-
-                // Re-validate linked invoice constraints at approval time to prevent race conditions.
-                if ($lockedReturn->purchaseInvoice) {
-                    if ($lockedReturn->purchaseInvoice->status !== 'approved') {
-                        throw ValidationException::withMessages([
-                            'purchase_invoice_id' => 'Linked purchase invoice is no longer approved. Reverse or restore the source invoice before approving this return.',
-                        ]);
-                    }
-
-                    $returnItemsPayload = $lockedReturn->items->map(function ($item) {
-                        return [
-                            'product_id' => $item->product_id,
-                            'batch_no' => $item->batch_no,
-                            'qty' => (float) $item->qty,
-                        ];
-                    })->all();
-
-                    $this->validateInvoiceLinkedReturnItems(
-                        $lockedReturn->purchaseInvoice,
-                        $returnItemsPayload,
-                        $lockedReturn->id
-                    );
-                }
-
-                $lockedReturn->update([
-                    'status' => 'approved',
-                    'approved_by' => $actor->id,
-                ]);
-
-                // Create inventory ledger entries for each line item
-                foreach ($lockedReturn->items as $item) {
-                    // Re-check stock at approval time to avoid overselling during concurrent operations.
-                    if (!$this->inventoryService->hasSufficientStock(
-                        $item->product_id,
-                        $item->batch_no,
-                        'warehouse',
-                        0,
-                        (float) $item->qty
-                    )) {
-                        throw ValidationException::withMessages([
-                            'items' => "Insufficient stock at approval for product ID {$item->product_id}, batch {$item->batch_no}.",
-                        ]);
-                    }
-
-                    $this->inventoryService->recordPurchaseReturn([
-                        'product_id' => $item->product_id,
-                        'batch_no' => $item->batch_no,
-                        'expiry_date' => $item->expiry_date,
-                        'qty' => $item->qty,
-                        'rate' => $item->rate,
-                        'reference_id' => $lockedReturn->id,
-                        'created_by' => $actor->id,
-                    ]);
-                }
-
-                $this->ledgerService->recordEntry(
-                    $lockedReturn->supplier,
-                    'PURCHASE_RETURN',
-                    debit: (float) $lockedReturn->total_amount,
-                    credit: 0,
-                    reference: $lockedReturn,
-                    paymentMode: 'adjustment',
-                    narration: "Purchase return {$lockedReturn->return_number} approved against supplier {$lockedReturn->supplier->name}",
-                    transactionDate: $lockedReturn->return_date,
-                );
-            });
+            $this->purchaseReturnLifecycleService->approve($purchaseReturn, $request->user());
         } catch (ValidationException $e) {
             return back()->withErrors($e->errors());
         } catch (\Exception $e) {
@@ -371,25 +312,7 @@ class PurchaseReturnController extends Controller
     public function cancel(PurchaseReturn $purchaseReturn)
     {
         try {
-            DB::transaction(function () use ($purchaseReturn) {
-                $lockedReturn = PurchaseReturn::whereKey($purchaseReturn->id)
-                    ->lockForUpdate()
-                    ->firstOrFail();
-
-                if ($lockedReturn->status === 'cancelled') {
-                    throw ValidationException::withMessages([
-                        'status' => 'Return is already cancelled.',
-                    ]);
-                }
-
-                if ($lockedReturn->status === 'approved') {
-                    throw ValidationException::withMessages([
-                        'status' => 'Cannot cancel an approved return directly. Reverse it manually.',
-                    ]);
-                }
-
-                $lockedReturn->update(['status' => 'cancelled']);
-            });
+            $this->purchaseReturnLifecycleService->cancel($purchaseReturn);
         } catch (ValidationException $e) {
             return back()->withErrors($e->errors());
         }
@@ -397,54 +320,19 @@ class PurchaseReturnController extends Controller
         return back()->with('success', 'Return cancelled.');
     }
 
-    /**
-     * Validate invoice-linked return lines do not exceed purchased quantities for each product+batch.
-     */
-    private function validateInvoiceLinkedReturnItems(PurchaseInvoice $invoice, array $items, ?int $excludingReturnId = null): void
+    public function reverse(Request $request, PurchaseReturn $purchaseReturn)
     {
-        $purchasedByKey = $invoice->items
-            ->groupBy(fn($i) => $i->product_id . '|' . $i->batch_no)
-            ->map(fn($group) => (float) $group->sum(fn($i) => (float) $i->qty + (float) $i->free_qty));
+        $validated = $request->validate([
+            'reason' => 'nullable|string|max:500',
+        ]);
 
-        $alreadyReturnedByKey = PurchaseReturnItem::query()
-            ->selectRaw('purchase_return_items.product_id, purchase_return_items.batch_no, COALESCE(SUM(purchase_return_items.qty), 0) as returned_qty')
-            ->join('purchase_returns as pr', 'pr.id', '=', 'purchase_return_items.purchase_return_id')
-            ->where('pr.purchase_invoice_id', $invoice->id)
-            ->where('pr.status', 'approved')
-            ->when($excludingReturnId, fn($q) => $q->where('pr.id', '!=', $excludingReturnId))
-            ->groupBy('purchase_return_items.product_id', 'purchase_return_items.batch_no')
-            ->get()
-            ->mapWithKeys(fn($row) => [
-                $row->product_id . '|' . $row->batch_no => (float) $row->returned_qty,
-            ]);
-
-        $requestedByKey = collect($items)
-            ->groupBy(fn($i) => $i['product_id'] . '|' . $i['batch_no'])
-            ->map(fn($group) => (float) $group->sum(fn($i) => (float) $i['qty']));
-
-        $errors = [];
-
-        foreach ($requestedByKey as $key => $requestedQty) {
-            $purchasedQty = (float) ($purchasedByKey[$key] ?? 0);
-            $returnedQty = (float) ($alreadyReturnedByKey[$key] ?? 0);
-
-            if ($purchasedQty <= 0) {
-                [$productId, $batchNo] = explode('|', $key);
-                $errors[] = "Item product {$productId}, batch {$batchNo} does not exist on linked invoice {$invoice->invoice_number}.";
-                continue;
-            }
-
-            if (($requestedQty + $returnedQty) > $purchasedQty + 0.0001) {
-                [$productId, $batchNo] = explode('|', $key);
-                $errors[] = "Return qty exceeds purchased qty for product {$productId}, batch {$batchNo}. Purchased: {$purchasedQty}, already returned: {$returnedQty}, requested: {$requestedQty}.";
-            }
+        try {
+            $this->purchaseReturnLifecycleService->reverse($purchaseReturn, $request->user(), $validated['reason'] ?? null);
+        } catch (ValidationException $e) {
+            return back()->withErrors($e->errors());
         }
 
-        if (!empty($errors)) {
-            throw ValidationException::withMessages([
-                'items' => implode(' ', $errors),
-            ]);
-        }
+        return back()->with('success', 'Purchase return reversed. Warehouse stock restored and supplier payable reopened.');
     }
 
     /**
@@ -459,7 +347,15 @@ class PurchaseReturnController extends Controller
                        ->orWhereHas('supplier', fn($s) => $s->where('name', 'like', "%{$search}%"));
                 });
             })
-            ->when($request->status, fn($q, $s) => $q->where('status', $s))
+            ->when($request->status, function ($query, $status) {
+                if ($status === 'reversed') {
+                    $query->whereNotNull('reversed_at');
+                    return;
+                }
+
+                $query->where('status', $status)
+                    ->when($status === 'approved', fn ($approvedQuery) => $approvedQuery->whereNull('reversed_at'));
+            })
             ->when($request->supplier_id, fn($q, $s) => $q->where('supplier_id', $s))
             ->latest();
 
@@ -474,7 +370,7 @@ class PurchaseReturnController extends Controller
             optional($return->return_date)?->format('Y-m-d'),
             $return->supplier->name ?? '',
             $return->purchaseInvoice?->invoice_number,
-            ucfirst($return->status),
+            ucfirst($return->workflow_status),
             round((float) $return->total_amount, 2),
             round((float) $return->cgst_amount, 2),
             round((float) $return->sgst_amount, 2),
@@ -485,7 +381,8 @@ class PurchaseReturnController extends Controller
         $summary = [
             'Returns' => $returns->count(),
             'Draft' => $returns->where('status', 'draft')->count(),
-            'Approved' => $returns->where('status', 'approved')->count(),
+            'Approved' => $returns->filter(fn (PurchaseReturn $return) => $return->isApprovedActive())->count(),
+            'Reversed' => $returns->whereNotNull('reversed_at')->count(),
             'Cancelled' => $returns->where('status', 'cancelled')->count(),
             'Total Amount' => round((float) $returns->sum('total_amount'), 2),
         ];
@@ -541,7 +438,7 @@ class PurchaseReturnController extends Controller
      */
     public function print(PurchaseReturn $purchaseReturn)
     {
-        $purchaseReturn->load(['supplier', 'purchaseInvoice', 'items.product', 'createdBy', 'approvedBy']);
+        $purchaseReturn->load(['supplier', 'purchaseInvoice', 'items.product', 'createdBy', 'approvedBy', 'reversedBy']);
 
         return Inertia::render('Procurement/PurchaseReturns/Print', [
             'purchaseReturn' => $purchaseReturn,

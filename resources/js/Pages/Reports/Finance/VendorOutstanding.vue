@@ -30,6 +30,14 @@ function clearFilters() {
     applyFilters();
 }
 
+function exportReport(format) {
+    window.location.href = route('reports.finance.vendor-outstanding', {
+        search: search.value || undefined,
+        min_outstanding: minOutstanding.value || undefined,
+        format,
+    });
+}
+
 function fmt(v) {
     return Number(v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -45,7 +53,14 @@ function fmtDate(v) {
 
     <AuthenticatedLayout>
         <template #header>
-            <h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Vendor Outstanding</h2>
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Vendor Outstanding</h2>
+                <div class="flex items-center gap-2">
+                    <button class="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700" @click="exportReport('csv')">CSV</button>
+                    <button class="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700" @click="exportReport('excel')">Excel</button>
+                    <button class="rounded-lg bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white" @click="exportReport('pdf')">PDF</button>
+                </div>
+            </div>
         </template>
 
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
@@ -102,6 +117,7 @@ function fmtDate(v) {
                     <tr>
                         <th class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Supplier</th>
                         <th class="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Outstanding</th>
+                        <th class="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Paid</th>
                         <th class="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">Current</th>
                         <th class="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">1-30d</th>
                         <th class="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">31-60d</th>
@@ -113,7 +129,7 @@ function fmtDate(v) {
                 </thead>
                 <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
                     <tr v-if="!rows?.data?.length">
-                        <td colspan="9" class="px-4 py-10 text-center text-sm text-gray-400">No outstanding suppliers found.</td>
+                        <td colspan="10" class="px-4 py-10 text-center text-sm text-gray-400">No outstanding suppliers found.</td>
                     </tr>
                     <tr v-for="r in rows.data" :key="r.supplier_id" class="hover:bg-gray-50 dark:hover:bg-gray-700/30">
                         <td class="px-4 py-3 text-sm">
@@ -124,6 +140,7 @@ function fmtDate(v) {
                             </div>
                         </td>
                         <td class="px-4 py-3 text-right text-sm font-semibold text-amber-600">INR {{ fmt(r.outstanding_balance) }}</td>
+                        <td class="px-4 py-3 text-right text-sm font-semibold text-emerald-600">{{ Number(r.total_paid || 0) ? `INR ${fmt(r.total_paid)}` : '-' }}</td>
                         <td class="px-4 py-3 text-right text-sm text-gray-700 dark:text-gray-200">{{ fmt(r.aging.current) }}</td>
                         <td class="px-4 py-3 text-right text-sm text-gray-700 dark:text-gray-200">{{ fmt(r.aging.days_1_30) }}</td>
                         <td class="px-4 py-3 text-right text-sm text-gray-700 dark:text-gray-200">{{ fmt(r.aging.days_31_60) }}</td>

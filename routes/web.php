@@ -195,6 +195,8 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
         Route::middleware('erp.role:Super Admin|Admin|Distributer')->group(function () {
             Route::resource('suppliers', SupplierController::class)->whereNumber('supplier');
             Route::post('suppliers/{supplier}/payments', [SupplierController::class, 'recordPayment'])->name('suppliers.payments.store')->whereNumber('supplier');
+            Route::post('suppliers/{supplier}/payments/{financial_ledger}/reallocate', [SupplierController::class, 'reallocatePayment'])->name('suppliers.payments.reallocate')->whereNumber('supplier')->whereNumber('financial_ledger');
+            Route::post('suppliers/{supplier}/payments/{financial_ledger}/reverse', [SupplierController::class, 'reversePayment'])->name('suppliers.payments.reverse')->whereNumber('supplier')->whereNumber('financial_ledger');
 
             Route::get('purchase-invoices/export', [PurchaseInvoiceController::class, 'export'])->name('purchase-invoices.export');
             Route::resource('purchase-invoices', PurchaseInvoiceController::class)
@@ -209,6 +211,7 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
                 ->only(['index', 'create', 'store', 'show'])
                 ->whereNumber('purchase_return');
             Route::post('purchase-returns/{purchase_return}/approve', [PurchaseReturnController::class, 'approve'])->name('purchase-returns.approve');
+            Route::post('purchase-returns/{purchase_return}/reverse', [PurchaseReturnController::class, 'reverse'])->name('purchase-returns.reverse');
             Route::post('purchase-returns/{purchase_return}/cancel',  [PurchaseReturnController::class, 'cancel'])->name('purchase-returns.cancel');
             Route::get('purchase-returns/{purchase_return}/print', [PurchaseReturnController::class, 'print'])->name('purchase-returns.print');
 
@@ -221,6 +224,9 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
         // READ: franchisees see their own orders; HO/Distributer sees all — scoped in controller
         // WRITE: only dispatch-capable roles
         Route::middleware('erp.role:Super Admin|Admin|Distributer|Sales Team|Franchisee')->group(function () {
+            Route::get('dist-orders/export', [DistOrderController::class, 'export'])
+                ->name('dist-orders.export');
+
             Route::resource('dist-orders', DistOrderController::class)
                 ->only(['index', 'show'])
                 ->whereNumber('dist_order');

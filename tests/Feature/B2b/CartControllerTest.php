@@ -162,41 +162,136 @@ class CartControllerTest extends TestCase
         B2bCartItem::create([
             'b2b_cart_id' => $cart->id,
             'product_id' => $product->id,
-            'qty' => 2,
+            'qty' => 100,
             'free_qty' => 0,
             'rate' => 10,
-            'total_amount' => 20,
+            'total_amount' => 1000,
         ]);
 
         $this->actingAs($user)
             ->post(route('b2b.cart.checkout'))
-            ->assertRedirect(route('dashboard'));
+            ->assertRedirect(route('admin.dist-orders.index'));
 
         $order = DistOrder::query()->where('user_id', $user->id)->firstOrFail();
         $item = $order->items()->firstOrFail();
 
-        $this->assertSame(200.0, (float) $order->subtotal);
-        $this->assertSame(12.0, (float) $order->sgst_amount);
-        $this->assertSame(12.0, (float) $order->cgst_amount);
-        $this->assertSame(224.0, (float) $order->total_amount);
+        $this->assertSame(10000.0, (float) $order->subtotal);
+        $this->assertSame(600.0, (float) $order->sgst_amount);
+        $this->assertSame(600.0, (float) $order->cgst_amount);
+        $this->assertSame(11200.0, (float) $order->total_amount);
 
         $this->assertSame(100.0, (float) $item->rate);
         $this->assertSame(12.0, (float) $item->gst_percent);
-        $this->assertSame(24.0, (float) $item->gst_amount);
-        $this->assertSame(224.0, (float) $item->total_amount);
+        $this->assertSame(1200.0, (float) $item->gst_amount);
+        $this->assertSame(11200.0, (float) $item->total_amount);
 
         $cart->refresh();
         $this->assertSame(0.0, (float) $cart->subtotal);
         $this->assertSame(0, $cart->items()->count());
     }
 
+    public function test_update_qty_reprices_cart_line_using_current_franchise_rate(): void
+    {
+        $user = $this->makeFranchiseUser();
+        $support = $this->createSupportRecords();
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Mutable Rate Product',
+            'sku' => 'CART-UPDATE-001',
+            'rate_a' => 120,
+        ]);
+
+        $cart = B2bCart::create([
+            'franchisee_id' => $user->franchisee_id,
+            'user_id' => $user->id,
+            'subtotal' => 160,
+            'total_amount' => 160,
+        ]);
+
+        $item = B2bCartItem::create([
+            'b2b_cart_id' => $cart->id,
+            'product_id' => $product->id,
+            'qty' => 2,
+            'free_qty' => 0,
+            'rate' => 80,
+            'remark' => 'old',
+            'total_amount' => 160,
+        ]);
+
+        $this->actingAs($user)
+            ->patch(route('b2b.cart.updateQty', $item->id), [
+                'qty' => 11,
+                'remark' => 'updated',
+            ])
+            ->assertRedirect();
+
+        $item->refresh();
+        $cart->refresh();
+
+        $this->assertSame(11.0, (float) $item->qty);
+        $this->assertSame(1.0, (float) $item->free_qty);
+        $this->assertSame(120.0, (float) $item->rate);
+        $this->assertSame('updated', $item->remark);
+        $this->assertSame(1320.0, (float) $item->total_amount);
+        $this->assertSame(1320.0, (float) $cart->total_amount);
+    }
+
+    public function test_update_qty_removes_line_when_product_is_no_longer_visible_for_franchise(): void
+    {
+        $user = $this->makeFranchiseUser();
+        $support = $this->createSupportRecords();
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Hidden On Update Product',
+            'sku' => 'CART-UPDATE-002',
+            'rate_a' => 90,
+            'hide' => true,
+        ]);
+
+        $cart = B2bCart::create([
+            'franchisee_id' => $user->franchisee_id,
+            'user_id' => $user->id,
+            'subtotal' => 180,
+            'total_amount' => 180,
+        ]);
+
+        $item = B2bCartItem::create([
+            'b2b_cart_id' => $cart->id,
+            'product_id' => $product->id,
+            'qty' => 2,
+            'free_qty' => 0,
+            'rate' => 90,
+            'total_amount' => 180,
+        ]);
+
+        $this->actingAs($user)
+            ->from(route('b2b.cart.index'))
+            ->patch(route('b2b.cart.updateQty', $item->id), [
+                'qty' => 3,
+            ])
+            ->assertRedirect(route('b2b.cart.index'))
+            ->assertSessionHas('error');
+
+        $this->assertDatabaseMissing('b2b_cart_items', ['id' => $item->id]);
+        $cart->refresh();
+        $this->assertSame(0.0, (float) $cart->total_amount);
+    }
+
     private function makeFranchiseUser(): User
     {
-        Permission::create(['name' => 'module.b2b_cart.view']);
-        Permission::create(['name' => 'module.b2b_cart.create']);
+        $permissions = [
+            'module.b2b_cart.view',
+            'module.b2b_cart.create',
+            'module.b2b_cart.update',
+            'module.b2b_cart.delete',
+        ];
+
+        foreach ($permissions as $permission) {
+            Permission::firstOrCreate(['name' => $permission]);
+        }
 
         $role = Role::create(['name' => 'Franchisee']);
-        $role->givePermissionTo(['module.b2b_cart.view', 'module.b2b_cart.create']);
+        $role->givePermissionTo($permissions);
 
         $franchisee = Franchisee::create([
             'shop_name' => 'Test Franchise',

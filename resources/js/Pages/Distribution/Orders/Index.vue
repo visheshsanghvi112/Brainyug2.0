@@ -8,7 +8,8 @@ import {
     ClockIcon,
     MagnifyingGlassIcon,
     FunnelIcon,
-    ChevronRightIcon
+    ChevronRightIcon,
+    ArrowDownTrayIcon
 } from '@heroicons/vue/24/outline';
 import { ref, watch } from 'vue';
 import { Head, Link, router } from '@inertiajs/vue3';
@@ -104,7 +105,32 @@ const formatDate = (dateString) => {
 
     <AuthenticatedLayout>
         <template #header>
-            <h2 class="font-semibold text-xl text-gray-800 leading-tight">B2B Distribution & Dispatch</h2>
+            <div class="flex items-center justify-between gap-3">
+                <h2 class="font-semibold text-xl text-gray-800 leading-tight">B2B Distribution & Dispatch</h2>
+                <div class="flex items-center gap-2">
+                    <a
+                        :href="route('admin.dist-orders.export', { search, status: statusFilter, queue: queueFilter, format: 'csv' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500"
+                    >
+                        <ArrowDownTrayIcon class="h-4 w-4" />
+                        CSV
+                    </a>
+                    <a
+                        :href="route('admin.dist-orders.export', { search, status: statusFilter, queue: queueFilter, format: 'excel' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500"
+                    >
+                        <ArrowDownTrayIcon class="h-4 w-4" />
+                        Excel
+                    </a>
+                    <a
+                        :href="route('admin.dist-orders.export', { search, status: statusFilter, queue: queueFilter, format: 'pdf' })"
+                        class="inline-flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-600"
+                    >
+                        <ArrowDownTrayIcon class="h-4 w-4" />
+                        PDF
+                    </a>
+                </div>
+            </div>
         </template>
 
         <div class="py-6 lg:py-12">

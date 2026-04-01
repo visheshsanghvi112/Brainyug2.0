@@ -12,12 +12,20 @@ return new class extends Migration
      */
     public function up(): void
     {
+        if (DB::getDriverName() === 'sqlite') {
+            return;
+        }
+
         // MySQL: modify the enum to include 'allocated'.
         DB::statement("ALTER TABLE `dist_orders` MODIFY COLUMN `status` ENUM('pending','accepted','allocated','dispatched','delivered','rejected','cancelled') NOT NULL DEFAULT 'pending'");
     }
 
     public function down(): void
     {
+        if (DB::getDriverName() === 'sqlite') {
+            return;
+        }
+
         // Remove 'allocated'; any existing rows with this value would need manual remediation.
         DB::statement("ALTER TABLE `dist_orders` MODIFY COLUMN `status` ENUM('pending','accepted','dispatched','delivered','rejected','cancelled') NOT NULL DEFAULT 'pending'");
     }

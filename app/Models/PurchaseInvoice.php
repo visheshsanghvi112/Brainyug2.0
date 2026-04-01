@@ -36,6 +36,7 @@ class PurchaseInvoice extends Model
     public function supplier() { return $this->belongsTo(Supplier::class); }
     public function items() { return $this->hasMany(PurchaseInvoiceItem::class); }
     public function purchaseReturns() { return $this->hasMany(PurchaseReturn::class); }
+    public function paymentAllocations() { return $this->hasMany(SupplierPaymentAllocation::class); }
     public function createdBy() { return $this->belongsTo(User::class, 'created_by'); }
     public function approvedBy() { return $this->belongsTo(User::class, 'approved_by'); }
 

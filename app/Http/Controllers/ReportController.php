@@ -642,11 +642,11 @@ class ReportController extends Controller
             /** @var object{taxable_value:mixed,cgst_amount:mixed,sgst_amount:mixed,igst_amount:mixed,total_gst:mixed}|null $purchase */
 
             $itc = [
-                'taxable_value' => round((float) $purchase->taxable_value, 2),
-                'cgst_amount' => round((float) $purchase->cgst_amount, 2),
-                'sgst_amount' => round((float) $purchase->sgst_amount, 2),
-                'igst_amount' => round((float) $purchase->igst_amount, 2),
-                'total_gst' => round((float) $purchase->total_gst, 2),
+                'taxable_value' => $purchase ? round((float) $purchase->taxable_value, 2) : 0.00,
+                'cgst_amount' => $purchase ? round((float) $purchase->cgst_amount, 2) : 0.00,
+                'sgst_amount' => $purchase ? round((float) $purchase->sgst_amount, 2) : 0.00,
+                'igst_amount' => $purchase ? round((float) $purchase->igst_amount, 2) : 0.00,
+                'total_gst' => $purchase ? round((float) $purchase->total_gst, 2) : 0.00,
             ];
         } else {
             $taxableExpr = 'COALESCE(NULLIF(doi.taxable_amount, 0), (COALESCE(doi.approved_qty, doi.request_qty, 0) * doi.rate))';
@@ -667,11 +667,11 @@ class ReportController extends Controller
             /** @var object{taxable_value:mixed,cgst_amount:mixed,sgst_amount:mixed,igst_amount:mixed,total_gst:mixed}|null $dispatchInward */
 
             $itc = [
-                'taxable_value' => round((float) $dispatchInward->taxable_value, 2),
-                'cgst_amount' => round((float) $dispatchInward->cgst_amount, 2),
-                'sgst_amount' => round((float) $dispatchInward->sgst_amount, 2),
-                'igst_amount' => round((float) $dispatchInward->igst_amount, 2),
-                'total_gst' => round((float) $dispatchInward->total_gst, 2),
+                'taxable_value' => $dispatchInward ? round((float) $dispatchInward->taxable_value, 2) : 0.00,
+                'cgst_amount' => $dispatchInward ? round((float) $dispatchInward->cgst_amount, 2) : 0.00,
+                'sgst_amount' => $dispatchInward ? round((float) $dispatchInward->sgst_amount, 2) : 0.00,
+                'igst_amount' => $dispatchInward ? round((float) $dispatchInward->igst_amount, 2) : 0.00,
+                'total_gst' => $dispatchInward ? round((float) $dispatchInward->total_gst, 2) : 0.00,
             ];
         }
 
@@ -1508,7 +1508,9 @@ class ReportController extends Controller
             ->selectRaw('COUNT(*) as suppliers_with_dues, COALESCE(SUM(fl.running_balance),0) as total_outstanding')
             ->first();
 
-        $rows = (clone $baseQuery)
+        $format = $this->requestedExportFormat($request);
+
+        $rowQuery = (clone $baseQuery)
             ->select(
                 's.id as supplier_id',
                 's.name',
@@ -1518,29 +1520,40 @@ class ReportController extends Controller
                 'fl.running_balance as outstanding_balance',
                 'fl.transaction_date as ledger_date'
             )
-            ->orderByDesc('fl.running_balance')
-            ->paginate(30)
-            ->withQueryString();
+            ->orderByDesc('fl.running_balance');
 
-        $supplierIds = collect($rows->items())->pluck('supplier_id')->all();
+        $rows = $format
+            ? $rowQuery->get()
+            : $rowQuery->paginate(30)->withQueryString();
+
+        $rowItems = $format ? $rows : collect($rows->items());
+
+        $supplierIds = $rowItems->pluck('supplier_id')->all();
 
         $invoiceAgg = collect();
         $returnAgg = collect();
         $paymentAgg = collect();
 
         if (!empty($supplierIds)) {
-            $dueExpr = 'DATE_ADD(invoice_date, INTERVAL COALESCE(due_days, 0) DAY)';
+            $driver = DB::connection()->getDriverName();
+            $dueExpr = $driver === 'sqlite'
+                ? "date(invoice_date, '+' || COALESCE(due_days, 0) || ' day')"
+                : 'DATE_ADD(invoice_date, INTERVAL COALESCE(due_days, 0) DAY)';
+            $currentDateExpr = $driver === 'sqlite' ? "date('now')" : 'CURDATE()';
+            $daysPastDueExpr = $driver === 'sqlite'
+                ? "CAST(julianday({$currentDateExpr}) - julianday({$dueExpr}) AS INTEGER)"
+                : "DATEDIFF({$currentDateExpr}, {$dueExpr})";
 
             $invoiceAgg = PurchaseInvoice::query()
                 ->approved()
                 ->whereIn('supplier_id', $supplierIds)
                 ->selectRaw("supplier_id,
                     COALESCE(SUM(total_amount), 0) as gross_invoiced,
-                    COALESCE(SUM(CASE WHEN {$dueExpr} >= CURDATE() THEN total_amount ELSE 0 END), 0) as bucket_current,
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), {$dueExpr}) BETWEEN 1 AND 30 THEN total_amount ELSE 0 END), 0) as bucket_1_30,
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), {$dueExpr}) BETWEEN 31 AND 60 THEN total_amount ELSE 0 END), 0) as bucket_31_60,
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), {$dueExpr}) BETWEEN 61 AND 90 THEN total_amount ELSE 0 END), 0) as bucket_61_90,
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), {$dueExpr}) > 90 THEN total_amount ELSE 0 END), 0) as bucket_90_plus,
+                    COALESCE(SUM(CASE WHEN {$dueExpr} >= {$currentDateExpr} THEN total_amount ELSE 0 END), 0) as bucket_current,
+                    COALESCE(SUM(CASE WHEN {$daysPastDueExpr} BETWEEN 1 AND 30 THEN total_amount ELSE 0 END), 0) as bucket_1_30,
+                    COALESCE(SUM(CASE WHEN {$daysPastDueExpr} BETWEEN 31 AND 60 THEN total_amount ELSE 0 END), 0) as bucket_31_60,
+                    COALESCE(SUM(CASE WHEN {$daysPastDueExpr} BETWEEN 61 AND 90 THEN total_amount ELSE 0 END), 0) as bucket_61_90,
+                    COALESCE(SUM(CASE WHEN {$daysPastDueExpr} > 90 THEN total_amount ELSE 0 END), 0) as bucket_90_plus,
                     COALESCE(MAX(invoice_date), NULL) as last_invoice_date")
                 ->groupBy('supplier_id')
                 ->get()
@@ -1548,6 +1561,7 @@ class ReportController extends Controller
 
             $returnAgg = PurchaseReturn::query()
                 ->where('status', 'approved')
+                ->whereNull('reversed_at')
                 ->whereIn('supplier_id', $supplierIds)
                 ->selectRaw('supplier_id, COALESCE(SUM(total_amount), 0) as total_returns')
                 ->groupBy('supplier_id')
@@ -1558,14 +1572,15 @@ class ReportController extends Controller
                 ->where('ledgerable_type', $supplierMorph)
                 ->whereIn('ledgerable_id', $supplierIds)
                 ->selectRaw("ledgerable_id as supplier_id,
-                    COALESCE(SUM(CASE WHEN transaction_type = 'PAYMENT_MADE' THEN debit ELSE 0 END), 0) as total_paid,
-                    MAX(CASE WHEN transaction_type = 'PAYMENT_MADE' THEN transaction_date ELSE NULL END) as last_payment_date")
+                    COALESCE(SUM(CASE WHEN transaction_type = 'PAYMENT_MADE' THEN debit ELSE 0 END), 0)
+                    - COALESCE(SUM(CASE WHEN transaction_type = 'PAYMENT_REVERSAL' THEN credit ELSE 0 END), 0) as total_paid,
+                    MAX(CASE WHEN transaction_type = 'PAYMENT_MADE' AND reversed_at IS NULL THEN transaction_date ELSE NULL END) as last_payment_date")
                 ->groupBy('ledgerable_id')
                 ->get()
                 ->keyBy('supplier_id');
         }
 
-        $enriched = collect($rows->items())->map(function ($row) use ($invoiceAgg, $returnAgg, $paymentAgg) {
+        $enriched = $rowItems->map(function ($row) use ($invoiceAgg, $returnAgg, $paymentAgg) {
             $invoice = $invoiceAgg->get($row->supplier_id);
             $returns = $returnAgg->get($row->supplier_id);
             $payments = $paymentAgg->get($row->supplier_id);
@@ -1601,13 +1616,69 @@ class ReportController extends Controller
             ];
         })->values();
 
-        $rows->setCollection($enriched);
-
         $summary = [
             'suppliers_with_dues' => (int) ($totals->suppliers_with_dues ?? 0),
             'total_outstanding' => round((float) ($totals->total_outstanding ?? 0), 2),
             'above_90_days' => round($enriched->sum(fn ($r) => (float) ($r['aging']['days_90_plus'] ?? 0)), 2),
         ];
+
+        if ($format) {
+            $headers = ['Supplier', 'Code', 'Phone', 'GST', 'Outstanding', 'Paid', 'Current', '1-30 Days', '31-60 Days', '61-90 Days', '90+ Days', 'Last Invoice', 'Last Payment'];
+            $exportRows = $enriched->map(fn (array $row) => [
+                $row['name'],
+                $row['code'],
+                $row['phone'],
+                $row['gst_number'],
+                $row['outstanding_balance'],
+                $row['total_paid'],
+                $row['aging']['current'] ?? 0,
+                $row['aging']['days_1_30'] ?? 0,
+                $row['aging']['days_31_60'] ?? 0,
+                $row['aging']['days_61_90'] ?? 0,
+                $row['aging']['days_90_plus'] ?? 0,
+                $row['last_invoice_date'],
+                $row['last_payment_date'],
+            ])->all();
+
+            $meta = [
+                'Suppliers with Outstanding' => $summary['suppliers_with_dues'],
+                'Total Outstanding' => $summary['total_outstanding'],
+                'Estimated 90+ Days Risk' => $summary['above_90_days'],
+                'Search Filter' => $request->input('search', 'All'),
+                'Min Outstanding Filter' => $request->input('min_outstanding', 'Any'),
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'vendor_outstanding',
+                    sheetTitle: 'Vendor Outstanding',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'vendor_outstanding',
+                    title: 'Vendor Outstanding Report',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($headers, $exportRows) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($exportRows as $row) {
+                    fputcsv($file, $row);
+                }
+                fclose($file);
+            }, 'vendor_outstanding_' . date('Ymd_His') . '.csv');
+        }
+
+        $rows->setCollection($enriched);
 
         return Inertia::render('Reports/Finance/VendorOutstanding', [
             'rows' => $rows,

@@ -108,6 +108,7 @@ class PurchaseInvoiceController extends Controller
             'approvedBy',
             'purchaseReturns.items',
             'purchaseReturns.createdBy',
+            'purchaseReturns.reversedBy',
         ]);
 
         $returnSummary = $this->buildReturnSummary($purchaseInvoice);
@@ -119,8 +120,9 @@ class PurchaseInvoiceController extends Controller
             'linkedReturns' => $purchaseInvoice->purchaseReturns
                 ->sortByDesc(fn ($purchaseReturn) => sprintf(
                     '%02d|%s|%010d',
-                    match ($purchaseReturn->status) {
+                    match ($purchaseReturn->workflow_status) {
                         'approved' => 3,
+                        'reversed' => 2,
                         'draft' => 2,
                         default => 1,
                     },
@@ -132,9 +134,12 @@ class PurchaseInvoiceController extends Controller
                     'id' => $purchaseReturn->id,
                     'return_number' => $purchaseReturn->return_number,
                     'return_date' => optional($purchaseReturn->return_date)?->format('Y-m-d'),
-                    'status' => $purchaseReturn->status,
+                    'status' => $purchaseReturn->workflow_status,
                     'total_amount' => round((float) $purchaseReturn->total_amount, 2),
                     'created_by_name' => $purchaseReturn->createdBy?->name,
+                    'reversed_by_name' => $purchaseReturn->reversedBy?->name,
+                    'reversed_at' => optional($purchaseReturn->reversed_at)?->format('Y-m-d H:i'),
+                    'reversal_reason' => $purchaseReturn->reversal_reason,
                 ]),
             'actions' => [
                 'can_edit' => $purchaseInvoice->canEdit(),
@@ -371,7 +376,7 @@ class PurchaseInvoiceController extends Controller
     {
         $purchasedQty = round((float) $purchaseInvoice->items->sum(fn ($item) => (float) $item->qty + (float) $item->free_qty), 2);
 
-        $approvedReturns = $purchaseInvoice->purchaseReturns->where('status', 'approved');
+        $approvedReturns = $purchaseInvoice->purchaseReturns->filter(fn ($purchaseReturn) => $purchaseReturn->isApprovedActive());
         $draftReturns = $purchaseInvoice->purchaseReturns->where('status', 'draft');
 
         $approvedReturnedQty = round((float) $approvedReturns->flatMap->items->sum(fn ($item) => (float) $item->qty), 2);

@@ -141,6 +141,68 @@ class ProductControllerTest extends TestCase
         ]);
     }
 
+    public function test_product_excel_export_returns_workbook_for_filtered_catalog(): void
+    {
+        $this->withoutMiddleware([
+            EnsureTwoFactorIsVerified::class,
+            EnsurePasswordResetCompleted::class,
+        ]);
+
+        $user = $this->makeAdminUser();
+        $support = $this->createSupportRecords();
+
+        $this->createProduct($support, [
+            'product_name' => 'Excel Export Product',
+            'sku' => 'EXPORT-001',
+            'barcode' => '9988776655',
+        ]);
+
+        $response = $this->actingAs($user)
+            ->get(route('admin.products.export.excel', [
+                'search' => 'Excel Export',
+                'layout' => 'compact',
+                'include_tax' => 1,
+                'include_units' => 0,
+                'include_pricing' => 1,
+            ]));
+
+        $response->assertOk();
+        $this->assertStringContainsString('.xlsx', (string) $response->headers->get('content-disposition'));
+    }
+
+    public function test_product_pdf_preview_renders_selected_export_metadata(): void
+    {
+        $this->withoutMiddleware([
+            EnsureTwoFactorIsVerified::class,
+            EnsurePasswordResetCompleted::class,
+        ]);
+
+        $user = $this->makeAdminUser();
+        $support = $this->createSupportRecords();
+
+        $this->createProduct($support, [
+            'product_name' => 'Preview Product',
+            'sku' => 'PREVIEW-001',
+        ]);
+
+        $response = $this->actingAs($user)
+            ->get(route('admin.products.export.pdf', [
+                'search' => 'Preview',
+                'layout' => 'detailed',
+                'include_barcode' => 1,
+                'include_tax' => 1,
+                'include_units' => 1,
+                'include_pricing' => 1,
+                'preview' => 1,
+            ]));
+
+        $response->assertOk();
+        $response->assertSee('Product Catalog');
+        $response->assertSee('Preview Product');
+        $response->assertSee('Included Blocks');
+        $response->assertSee('Barcode, Tax, Units, Pricing');
+    }
+
     private function makeAdminUser(): User
     {
         $role = Role::firstOrCreate(['name' => 'Admin']);

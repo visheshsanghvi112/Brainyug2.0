@@ -8,14 +8,15 @@ use App\Models\PurchaseReturn;
 use App\Models\Supplier;
 use App\Models\State;
 use App\Models\District;
-use App\Services\LedgerService;
+use App\Services\SupplierPaymentService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 
 class SupplierController extends Controller
 {
     public function __construct(
-        private LedgerService $ledgerService
+        private SupplierPaymentService $supplierPaymentService
     ) {}
 
     public function index(Request $request)
@@ -45,8 +46,10 @@ class SupplierController extends Controller
         $supplier->load(['state', 'district']);
 
         $latestBalance = $this->currentBalance($supplier);
+        $invoiceSnapshots = $this->supplierPaymentService->invoiceSnapshots($supplier);
 
         $recentLedgers = $supplier->financialLedgers()
+            ->withCount('supplierPaymentAllocations')
             ->latest('transaction_date')
             ->latest('id')
             ->limit(12)
@@ -60,46 +63,58 @@ class SupplierController extends Controller
                 'running_balance',
                 'payment_mode',
                 'narration',
+                'reversed_at',
+                'reversal_reason',
+                'reverses_financial_ledger_id',
             ]);
 
-        $recentInvoices = $supplier->purchaseInvoices()
-            ->approved()
-            ->latest('invoice_date')
-            ->limit(10)
-            ->get([
-                'id',
-                'invoice_number',
-                'supplier_invoice_no',
-                'invoice_date',
-                'due_days',
-                'total_amount',
-                'status',
-            ])
-            ->map(function ($invoice) {
-                $dueDate = $invoice->invoice_date?->copy()->addDays((int) ($invoice->due_days ?? 0));
+        $recentInvoices = $invoiceSnapshots->take(10)->values();
+        $invoiceSettlementOptions = $invoiceSnapshots->values();
+        $paymentAllocationMap = [];
 
-                return [
-                    'id' => $invoice->id,
-                    'invoice_number' => $invoice->invoice_number,
-                    'supplier_invoice_no' => $invoice->supplier_invoice_no,
-                    'invoice_date' => $invoice->invoice_date?->toDateString(),
-                    'due_days' => (int) ($invoice->due_days ?? 0),
-                    'due_date' => $dueDate?->toDateString(),
-                    'total_amount' => (float) $invoice->total_amount,
-                    'status' => $invoice->status,
-                ];
-            })
-            ->values();
+        $paymentLedgerIds = $recentLedgers
+            ->where('transaction_type', 'PAYMENT_MADE')
+            ->pluck('id')
+            ->all();
+
+        if (!empty($paymentLedgerIds)) {
+            $paymentAllocationMap = DB::table('supplier_payment_allocations as spa')
+                ->join('purchase_invoices as pi', 'pi.id', '=', 'spa.purchase_invoice_id')
+                ->whereIn('spa.financial_ledger_id', $paymentLedgerIds)
+                ->selectRaw('
+                    spa.financial_ledger_id,
+                    spa.purchase_invoice_id,
+                    pi.invoice_number,
+                    pi.supplier_invoice_no,
+                    COALESCE(SUM(spa.amount), 0) as allocated_amount
+                ')
+                ->groupBy('spa.financial_ledger_id', 'spa.purchase_invoice_id', 'pi.invoice_number', 'pi.supplier_invoice_no')
+                ->get()
+                ->filter(fn ($row) => abs((float) $row->allocated_amount) > 0.009)
+                ->groupBy('financial_ledger_id')
+                ->map(fn ($rows) => $rows
+                    ->map(fn ($row) => [
+                        'purchase_invoice_id' => (int) $row->purchase_invoice_id,
+                        'invoice_number' => $row->invoice_number,
+                        'supplier_invoice_no' => $row->supplier_invoice_no,
+                        'allocated_amount' => round((float) $row->allocated_amount, 2),
+                    ])
+                    ->values()
+                    ->all())
+                ->all();
+        }
 
         $recentReturns = PurchaseReturn::query()
             ->where('supplier_id', $supplier->id)
             ->where('status', 'approved')
+            ->whereNull('reversed_at')
             ->latest('return_date')
             ->limit(8)
             ->get([
                 'id',
                 'return_number',
                 'return_date',
+                'status',
                 'total_amount',
                 'reason',
             ]);
@@ -108,18 +123,13 @@ class SupplierController extends Controller
         $grossReturns = (float) PurchaseReturn::query()
             ->where('supplier_id', $supplier->id)
             ->where('status', 'approved')
+            ->whereNull('reversed_at')
             ->sum('total_amount');
-        $paymentsMade = (float) $supplier->financialLedgers()
-            ->where('transaction_type', 'PAYMENT_MADE')
-            ->sum('debit');
-        $overdueInvoices = $supplier->purchaseInvoices()
-            ->approved()
-            ->whereRaw('DATE_ADD(invoice_date, INTERVAL COALESCE(due_days, 0) DAY) < CURDATE()')
-            ->count();
-        $overdueExposure = (float) $supplier->purchaseInvoices()
-            ->approved()
-            ->whereRaw('DATE_ADD(invoice_date, INTERVAL COALESCE(due_days, 0) DAY) < CURDATE()')
-            ->sum('total_amount');
+        $paymentsMade = round((float) $invoiceSnapshots->sum('paid_amount'), 2);
+        $overdueInvoices = $invoiceSnapshots->where('is_overdue', true)->count();
+        $overdueExposure = round((float) $invoiceSnapshots->where('is_overdue', true)->sum('outstanding_amount'), 2);
+        $openInvoiceExposure = round((float) $invoiceSnapshots->sum('outstanding_amount'), 2);
+        $openInvoiceCount = $invoiceSnapshots->filter(fn (array $snapshot) => (float) $snapshot['outstanding_amount'] > 0)->count();
 
         return Inertia::render('Procurement/Suppliers/Show', [
             'supplier' => $supplier,
@@ -130,9 +140,13 @@ class SupplierController extends Controller
                 'payments_made' => $paymentsMade,
                 'overdue_invoices' => $overdueInvoices,
                 'overdue_exposure' => $overdueExposure,
+                'open_invoice_exposure' => $openInvoiceExposure,
+                'open_invoice_count' => $openInvoiceCount,
             ],
             'recentLedgers' => $recentLedgers,
             'recentInvoices' => $recentInvoices,
+            'invoiceSettlementOptions' => $invoiceSettlementOptions,
+            'paymentAllocationMap' => $paymentAllocationMap,
             'recentReturns' => $recentReturns,
             'ledgerUrl' => route('ledger.index', ['type' => 'supplier', 'id' => $supplier->id]),
         ]);
@@ -218,33 +232,57 @@ class SupplierController extends Controller
             'narration' => 'nullable|string|max:500',
         ]);
 
-        $currentBalance = $this->currentBalance($supplier);
-
-        if ($currentBalance <= 0) {
-            return back()->with('error', 'This supplier does not have any outstanding payable to settle.');
-        }
-
-        if ((float) $validated['amount'] > $currentBalance) {
+        try {
+            $this->supplierPaymentService->recordPayment($supplier, $request->user(), $validated);
+        } catch (\DomainException $e) {
             return back()->withErrors([
-                'amount' => 'Payment cannot exceed the current outstanding supplier balance.',
+                'amount' => $e->getMessage(),
             ]);
         }
 
-        $amount = round((float) $validated['amount'], 2);
+        return redirect()->route('admin.suppliers.show', $supplier)
+            ->with('success', 'Supplier payment recorded and auto-allocated against open purchase invoices.');
+    }
 
-        $this->ledgerService->recordEntry(
-            $supplier,
-            'PAYMENT_MADE',
-            debit: $amount,
-            credit: 0,
-            reference: null,
-            paymentMode: strtolower($validated['payment_mode']),
-            narration: $validated['narration'] ?: "Supplier payment recorded for {$supplier->name}",
-            transactionDate: $validated['payment_date'],
-        );
+    public function reversePayment(Request $request, Supplier $supplier, FinancialLedger $financialLedger)
+    {
+        $validated = $request->validate([
+            'reason' => 'required|string|max:500',
+            'reversal_date' => 'required|date',
+        ]);
+
+        try {
+            $this->supplierPaymentService->reversePayment($supplier, $financialLedger, $request->user(), $validated);
+        } catch (\DomainException $e) {
+            return back()->withErrors([
+                'payment_reversal' => $e->getMessage(),
+            ]);
+        }
 
         return redirect()->route('admin.suppliers.show', $supplier)
-            ->with('success', 'Supplier payment recorded in the financial ledger.');
+            ->with('success', 'Supplier payment reversed and invoice settlement reopened.');
+    }
+
+    public function reallocatePayment(Request $request, Supplier $supplier, FinancialLedger $financialLedger)
+    {
+        $validated = $request->validate([
+            'reason' => 'required|string|max:500',
+            'reallocation_date' => 'required|date',
+            'allocations' => 'required|array|min:1',
+            'allocations.*.purchase_invoice_id' => 'required|integer|exists:purchase_invoices,id',
+            'allocations.*.amount' => 'required|numeric|min:0',
+        ]);
+
+        try {
+            $this->supplierPaymentService->reallocatePayment($supplier, $financialLedger, $request->user(), $validated);
+        } catch (\DomainException $e) {
+            return back()->withErrors([
+                'payment_reallocation' => $e->getMessage(),
+            ]);
+        }
+
+        return redirect()->route('admin.suppliers.show', $supplier)
+            ->with('success', 'Supplier payment allocation corrected against the selected purchase invoices.');
     }
 
     public function destroy(Supplier $supplier)

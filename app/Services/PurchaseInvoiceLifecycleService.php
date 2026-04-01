@@ -110,7 +110,7 @@ class PurchaseInvoiceLifecycleService
 
             if ($lockedInvoice->status === 'approved') {
                 $activeReturns = $lockedInvoice->purchaseReturns
-                    ->where('status', '!=', 'cancelled')
+                    ->filter(fn ($purchaseReturn) => $purchaseReturn->status === 'draft' || $purchaseReturn->isApprovedActive())
                     ->values();
 
                 if ($activeReturns->isNotEmpty()) {

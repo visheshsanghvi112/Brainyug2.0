@@ -28,7 +28,7 @@ onMounted(() => {
             <div class="text-right">
                 <p class="text-xs uppercase text-gray-500 font-bold mb-1">Return No</p>
                 <p class="text-xl font-bold border rounded px-3 py-1 bg-gray-50">{{ purchaseReturn.return_number }}</p>
-                <p class="text-sm bg-amber-100 text-amber-800 rounded px-2 mt-2 font-bold inline-block">{{ String(purchaseReturn.status).toUpperCase() }}</p>
+                <p class="text-sm bg-amber-100 text-amber-800 rounded px-2 mt-2 font-bold inline-block">{{ String(purchaseReturn.workflow_status || purchaseReturn.status).toUpperCase() }}</p>
             </div>
         </div>
 
@@ -45,6 +45,7 @@ onMounted(() => {
                 <table class="w-full text-sm">
                     <tr><td class="text-gray-600 py-1">Return Date:</td><td class="font-bold text-right">{{ new Date(purchaseReturn.return_date).toLocaleDateString() }}</td></tr>
                     <tr><td class="text-gray-600 py-1">Reason:</td><td class="font-bold text-right">{{ purchaseReturn.reason || 'N/A' }}</td></tr>
+                    <tr v-if="purchaseReturn.reversal_reason"><td class="text-gray-600 py-1">Reversal:</td><td class="font-bold text-right">{{ purchaseReturn.reversal_reason }}</td></tr>
                     <tr><td class="text-gray-600 py-1">Linked Invoice:</td><td class="font-bold text-right">{{ purchaseReturn.purchase_invoice?.invoice_number || 'N/A' }}</td></tr>
                 </table>
             </div>
@@ -92,6 +93,7 @@ onMounted(() => {
             <div>
                 <p>Created By: {{ purchaseReturn.createdBy?.name || 'System' }}</p>
                 <p v-if="purchaseReturn.approvedBy">Approved By: {{ purchaseReturn.approvedBy.name }}</p>
+                <p v-if="purchaseReturn.reversedBy">Reversed By: {{ purchaseReturn.reversedBy.name }}</p>
             </div>
             <div class="text-right">
                 <p>Generated dynamically by BrainYug ERP via system export.</p>

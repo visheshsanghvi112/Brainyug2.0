@@ -65,15 +65,15 @@ class DistOrderWorkflowAuditTest extends TestCase
         B2bCartItem::create([
             'b2b_cart_id' => $cart->id,
             'product_id' => $product->id,
-            'qty' => 2,
+            'qty' => 100,
             'free_qty' => 0,
             'rate' => 120,
-            'total_amount' => 240,
+            'total_amount' => 12000,
         ]);
 
         $this->actingAs($franchiseUser)
             ->post(route('b2b.cart.checkout'))
-            ->assertRedirect(route('dashboard'));
+            ->assertRedirect(route('admin.dist-orders.index'));
 
         $order = DistOrder::query()
             ->with('statusLogs')

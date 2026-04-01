@@ -4,41 +4,26 @@
     <meta charset="utf-8">
     <title>Product Catalog</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: Arial, sans-serif; font-size: 9px; color: #333; padding: 16px; }
-        .header { text-align: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #1F4E79; }
-        .header h1 { font-size: 18px; color: #1F4E79; margin-bottom: 2px; }
-        .header .meta { font-size: 8px; color: #666; }
-        table { width: 100%; border-collapse: collapse; }
-        th {
-            background-color: #1F4E79;
-            color: #fff;
-            font-weight: bold;
-            font-size: 8px;
-            text-transform: uppercase;
-            padding: 6px 4px;
-            text-align: left;
-            white-space: nowrap;
-        }
-        th.right, td.right { text-align: right; }
-        th.center, td.center { text-align: center; }
-        td {
-            padding: 4px;
-            border-bottom: 1px solid #e0e0e0;
-            font-size: 8px;
-            vertical-align: top;
-        }
-        .row-even td { background-color: #f7fafc; }
-        .product-name { font-weight: bold; max-width: 150px; word-wrap: break-word; }
-        .salt-name { max-width: 120px; word-wrap: break-word; color: #555; }
-        .badge-active { color: #16a34a; font-weight: bold; }
-        .badge-inactive { color: #dc2626; font-weight: bold; }
-        .footer { margin-top: 10px; text-align: center; font-size: 7px; color: #999; border-top: 1px solid #ddd; padding-top: 6px; }
-        .page-break { page-break-after: always; }
+        * { box-sizing: border-box; }
+        body { font-family: DejaVu Sans, Arial, sans-serif; font-size: 9px; color: #0f172a; margin: 0; padding: 14px; }
+        .header { border-bottom: 2px solid #1d4ed8; padding-bottom: 10px; margin-bottom: 12px; }
+        .header h1 { margin: 0; font-size: 20px; color: #1e3a8a; }
+        .header p { margin: 4px 0 0; font-size: 9px; color: #475569; }
+        .summary { width: 100%; margin-bottom: 12px; border-collapse: separate; border-spacing: 8px 0; }
+        .summary td { width: 25%; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px; background: #f8fafc; }
+        .summary .label { font-size: 8px; text-transform: uppercase; color: #64748b; margin-bottom: 3px; }
+        .summary .value { font-size: 13px; font-weight: bold; color: #0f172a; }
+        .meta { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+        .meta td { border: 1px solid #e2e8f0; padding: 5px 6px; vertical-align: top; }
+        .meta .label { width: 24%; background: #f8fafc; font-weight: bold; color: #334155; }
+        table.catalog { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        table.catalog th { background: #0f766e; color: #ffffff; font-size: 8px; text-transform: uppercase; padding: 6px 4px; border: 1px solid #cbd5e1; }
+        table.catalog td { border: 1px solid #e2e8f0; padding: 5px 4px; font-size: 8px; vertical-align: top; word-wrap: break-word; }
+        table.catalog tbody tr:nth-child(even) td { background: #f8fafc; }
+        .right { text-align: right; }
+        .center { text-align: center; }
+        .footer { margin-top: 10px; text-align: center; font-size: 7px; color: #64748b; border-top: 1px solid #cbd5e1; padding-top: 6px; }
         @page { size: A4 landscape; margin: 10mm; }
-        @media print {
-            body { padding: 0; }
-        }
     </style>
     @if(!empty($autoPrint))
     <script>
@@ -51,81 +36,65 @@
 <body>
     <div class="header">
         <h1>Product Catalog</h1>
-        <div class="meta">Generated: {{ $generatedAt }} &bull; Total Products: {{ $totalCount }}</div>
+        <p>{{ $subtitle }}</p>
+        <p>Generated: {{ $generatedAt }} | Total Products: {{ $totalCount }}</p>
     </div>
 
-    <table>
+    <table class="summary">
+        <tr>
+            <td>
+                <div class="label">Total Products</div>
+                <div class="value">{{ $meta['Total Products'] ?? $totalCount }}</div>
+            </td>
+            <td>
+                <div class="label">Active Products</div>
+                <div class="value">{{ $meta['Active Products'] ?? 0 }}</div>
+            </td>
+            <td>
+                <div class="label">Inactive Products</div>
+                <div class="value">{{ $meta['Inactive Products'] ?? 0 }}</div>
+            </td>
+            <td>
+                <div class="label">Layout</div>
+                <div class="value">{{ $meta['Export Layout'] ?? 'Detailed' }}</div>
+            </td>
+        </tr>
+    </table>
+
+    <table class="meta">
+        @foreach($meta as $label => $value)
+        <tr>
+            <td class="label">{{ $label }}</td>
+            <td>{{ $value }}</td>
+        </tr>
+        @endforeach
+    </table>
+
+    <table class="catalog">
         <thead>
             <tr>
-                <th class="center">SR</th>
-                <th>PRODUCT NAME</th>
-                <th>CONTENT / SALT</th>
-                <th>COMPANY</th>
-                <th>CATEGORY</th>
-                <th>HSN</th>
-                <th>PACKING</th>
-                <th>BOX SIZE</th>
-                <th class="center">CONV.</th>
-                <th class="right">MRP</th>
-                <th class="right">PTR</th>
-                <th class="right">PTS</th>
-                <th class="right">RATE A</th>
-                <th class="right">CSR</th>
-                <th class="center">STATUS</th>
+                @foreach($headers as $header)
+                <th>{{ $header }}</th>
+                @endforeach
             </tr>
         </thead>
         <tbody>
-            @foreach($products as $idx => $product)
-            @if($idx > 0 && $idx % 50 === 0)
-            </tbody></table>
-            <div style="page-break-after: always;"></div>
-            <table>
-            <thead><tr>
-                <th class="center">SR</th>
-                <th>PRODUCT NAME</th>
-                <th>CONTENT / SALT</th>
-                <th>COMPANY</th>
-                <th>CATEGORY</th>
-                <th>HSN</th>
-                <th>PACKING</th>
-                <th>BOX SIZE</th>
-                <th class="center">CONV.</th>
-                <th class="right">MRP</th>
-                <th class="right">PTR</th>
-                <th class="right">PTS</th>
-                <th class="right">RATE A</th>
-                <th class="right">CSR</th>
-                <th class="center">STATUS</th>
-            </tr></thead>
-            <tbody>
-            @endif
-            <tr class="{{ $idx % 2 === 1 ? 'row-even' : '' }}">
-                <td class="center">{{ $idx + 1 }}</td>
-                <td class="product-name">{{ $product->product_name }}</td>
-                <td class="salt-name">{{ $product->salt?->name ?? '—' }}</td>
-                <td>{{ $product->company?->name ?? '—' }}</td>
-                <td>{{ $product->category?->name ?? '—' }}</td>
-                <td>{{ $product->hsn?->hsn_code ?? '—' }}</td>
-                <td>{{ $product->packing_desc ?? '—' }}</td>
-                <td>{{ $product->boxSize?->size_name ?? '—' }}</td>
-                <td class="center">{{ $product->conversion_factor }}</td>
-                <td class="right">{{ number_format($product->mrp, 2) }}</td>
-                <td class="right">{{ number_format($product->ptr, 2) }}</td>
-                <td class="right">{{ number_format($product->pts, 2) }}</td>
-                <td class="right">{{ number_format($product->rate_a ?? 0, 2) }}</td>
-                <td class="right">{{ number_format($product->csr ?? 0, 2) }}</td>
-                <td class="center">
-                    <span class="{{ $product->is_active ? 'badge-active' : 'badge-inactive' }}">
-                        {{ $product->is_active ? 'Active' : 'Inactive' }}
-                    </span>
-                </td>
+            @forelse($rows as $row)
+            <tr>
+                @foreach($row as $cell)
+                <td class="{{ is_numeric($cell) ? 'right' : '' }}">{{ $cell }}</td>
+                @endforeach
             </tr>
-            @endforeach
+            @empty
+            <tr>
+                <td colspan="{{ count($headers) }}" class="center">No products matched the selected filters.</td>
+            </tr>
+            @endforelse
         </tbody>
     </table>
 
     <div class="footer">
-        BrainyUG ERP &mdash; Product Catalog Export &mdash; Confidential
+        BrainyUG ERP - Product Catalog Export - Confidential
     </div>
 </body>
 </html>

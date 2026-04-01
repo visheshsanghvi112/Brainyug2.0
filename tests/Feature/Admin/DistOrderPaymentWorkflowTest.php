@@ -119,6 +119,46 @@ class DistOrderPaymentWorkflowTest extends TestCase
             ->assertNotFound();
     }
 
+    public function test_franchisee_export_only_contains_own_orders(): void
+    {
+        $ownerA = $this->makeFranchiseUser('fr_export_a', ['module.dist_orders.view']);
+        $ownerB = $this->makeFranchiseUser('fr_export_b', ['module.dist_orders.view']);
+
+        $ownOrder = $this->createDistOrder($ownerA, [
+            'order_number' => 'ORD-EXPORT-A',
+            'status' => 'dispatched',
+            'total_amount' => 1250,
+        ]);
+
+        $this->createDistOrder($ownerB, [
+            'order_number' => 'ORD-EXPORT-B',
+            'status' => 'pending',
+            'total_amount' => 980,
+        ]);
+
+        DistOrderPayment::create([
+            'dist_order_id' => $ownOrder->id,
+            'franchisee_id' => $ownerA->franchisee_id,
+            'created_by' => $ownerA->id,
+            'amount' => 250,
+            'payment_mode' => 'upi',
+            'reference_no' => 'UPI-EXPORT-1',
+            'payment_date' => now()->toDateString(),
+            'status' => 'confirmed',
+        ]);
+
+        $response = $this->actingAs($ownerA)
+            ->get(route('admin.dist-orders.export', ['format' => 'csv']));
+
+        $response->assertOk();
+
+        $content = $response->streamedContent();
+
+        $this->assertStringContainsString('ORD-EXPORT-A', $content);
+        $this->assertStringNotContainsString('ORD-EXPORT-B', $content);
+        $this->assertStringContainsString('Outstanding', $content);
+    }
+
     public function test_franchisee_payment_submission_stays_pending_and_cannot_exceed_outstanding(): void
     {
         $franchiseUser = $this->makeFranchiseUser('fr_pay', [

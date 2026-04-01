@@ -121,8 +121,13 @@ class CartController extends Controller
     public function updateQty(Request $request, B2bCartItem $item)
     {
         $franchiseeId = $request->user()->getEffectiveFranchiseeId();
+        $userId = $request->user()->id;
 
-        if (!$franchiseeId || $item->cart->franchisee_id !== $franchiseeId) {
+        if (
+            !$franchiseeId
+            || (int) $item->cart->franchisee_id !== (int) $franchiseeId
+            || (int) $item->cart->user_id !== (int) $userId
+        ) {
             abort(403);
         }
 
@@ -131,12 +136,25 @@ class CartController extends Controller
             'remark' => 'nullable|string|max:255',
         ]);
 
+        $product = Product::query()
+            ->visibleForFranchise()
+            ->find($item->product_id);
+
+        if (!$product) {
+            $cart = $item->cart;
+            $item->delete();
+            $this->updateCartTotals($cart);
+
+            return back()->with('error', 'This product is no longer available for franchise ordering and was removed from the cart.');
+        }
+
         $newQty  = (float) $validated['qty'];
-        $rate    = (float) $item->rate;
+        $rate    = (float) $product->franchiseRate();
         $freeQty = $this->calculateFreeQty($newQty);
 
         $item->update([
             'qty'          => $newQty,
+            'rate'         => $rate,
             'free_qty'     => $freeQty,
             'remark'       => array_key_exists('remark', $validated) ? $validated['remark'] : $item->remark,
             'total_amount' => round($newQty * $rate, 2),
@@ -149,7 +167,13 @@ class CartController extends Controller
 
     public function remove(Request $request, B2bCartItem $item)
     {
-        if ($item->cart->user_id !== $request->user()->id) {
+        $franchiseeId = $request->user()->getEffectiveFranchiseeId();
+
+        if (
+            !$franchiseeId
+            || (int) $item->cart->franchisee_id !== (int) $franchiseeId
+            || (int) $item->cart->user_id !== (int) $request->user()->id
+        ) {
             abort(403);
         }
 
@@ -177,14 +201,14 @@ class CartController extends Controller
             return back()->with('error', 'Cart is empty. Add products to place an order.');
         }
 
-        // ── GAP FIX: Backend enforcement of the ₹10,000 minimum order amount ──
+        // Backend enforcement of the Rs 10,000 minimum order amount.
         // Sync rates first so the total is fresh before the check.
         $this->syncCartRates($cart);
         $cart->refresh();
 
         if ((float) $cart->total_amount < 10000) {
             return back()->with('error',
-                'Minimum order value of ₹10,000 required. Current total: ₹'
+                'Minimum order value of Rs 10,000 required. Current total: Rs '
                 . number_format((float) $cart->total_amount, 2)
             );
         }
@@ -256,7 +280,7 @@ class CartController extends Controller
             $cart->update(['subtotal' => 0, 'total_amount' => 0]);
         });
 
-        // ── GAP FIX: Redirect to order history, not dashboard ───────────────
+        // Redirect to order history, not dashboard.
         return redirect()->route('admin.dist-orders.index')
             ->with('success', 'Order submitted successfully! HO will allocate batches and dispatch shortly.');
     }

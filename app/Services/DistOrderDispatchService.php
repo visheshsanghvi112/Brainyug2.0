@@ -44,18 +44,6 @@ class DistOrderDispatchService
                     throw new DomainException("Allocated batch missing for Product {$item->product->product_name}.");
                 }
 
-                if (
-                    !$this->inventoryService->hasSufficientStock(
-                        $item->product_id,
-                        (string) $item->batch_no,
-                        'warehouse',
-                        0,
-                        $dispatchQty
-                    )
-                ) {
-                    throw new DomainException("Insufficient warehouse stock for Product {$item->product->product_name}, Batch {$item->batch_no}.");
-                }
-
                 $dispatchableLines++;
 
                 $this->inventoryService->recordDispatch([

@@ -34,6 +34,10 @@ function linkedReturnStatusClass(status) {
         return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200';
     }
 
+    if (status === 'reversed') {
+        return 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-200';
+    }
+
     if (status === 'draft') {
         return 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200';
     }

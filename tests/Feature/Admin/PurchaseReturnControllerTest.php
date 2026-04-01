@@ -17,6 +17,7 @@ use App\Models\RackSection;
 use App\Models\SaltMaster;
 use App\Models\Supplier;
 use App\Models\User;
+use App\Services\LedgerService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
@@ -529,6 +530,262 @@ class PurchaseReturnControllerTest extends TestCase
 
         $purchaseReturn->refresh();
         $this->assertSame('draft', $purchaseReturn->status);
+    }
+
+    public function test_approved_purchase_return_can_be_reversed_with_compensating_stock_and_ledger_entries(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Reversal Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Reversal Product',
+            'sku' => 'RET-REV-001',
+            'mrp' => 140,
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0201',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->subDays(5)->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 500,
+            'discount_amount' => 0,
+            'sgst_amount' => 30,
+            'cgst_amount' => 30,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 560,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'hsn_id' => $product->hsn_id ?? 1,
+            'batch_no' => 'REV-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'mfg_date' => now()->subMonths(1)->toDateString(),
+            'qty' => 5,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 140,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 60,
+            'taxable_amount' => 500,
+            'total_amount' => 560,
+        ]);
+
+        InventoryLedger::create([
+            'product_id' => $product->id,
+            'batch_no' => 'REV-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'mfg_date' => now()->subMonths(1)->toDateString(),
+            'mrp' => 140,
+            'location_type' => 'warehouse',
+            'location_id' => 0,
+            'transaction_type' => 'PURCHASE',
+            'reference_type' => 'purchase_invoice',
+            'reference_id' => $invoice->id,
+            'qty_in' => 5,
+            'qty_out' => 0,
+            'rate' => 100,
+            'created_by' => $user->id,
+        ]);
+
+        app(LedgerService::class)->recordEntry(
+            $supplier,
+            'PURCHASE',
+            debit: 0,
+            credit: 560,
+            reference: $invoice,
+            paymentMode: 'credit',
+            narration: 'Approved purchase invoice',
+            transactionDate: $invoice->invoice_date
+        );
+
+        $purchaseReturn = PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0201',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 100,
+            'sgst_amount' => 6,
+            'cgst_amount' => 6,
+            'igst_amount' => 0,
+            'total_amount' => 112,
+            'status' => 'draft',
+            'created_by' => $user->id,
+            'workflow_status' => 'reversed',
+        ]);
+
+        $purchaseReturn->items()->create([
+            'product_id' => $product->id,
+            'batch_no' => 'REV-BATCH-1',
+            'expiry_date' => now()->addMonths(10)->toDateString(),
+            'qty' => 1,
+            'rate' => 100,
+            'gst_percent' => 12,
+            'gst_amount' => 12,
+            'total_amount' => 112,
+        ]);
+
+        $this->actingAs($user)
+            ->from(route('admin.purchase-returns.show', $purchaseReturn))
+            ->post(route('admin.purchase-returns.approve', $purchaseReturn))
+            ->assertRedirect(route('admin.purchase-returns.show', $purchaseReturn));
+
+        $this->actingAs($user)
+            ->from(route('admin.purchase-returns.show', $purchaseReturn))
+            ->post(route('admin.purchase-returns.reverse', $purchaseReturn), [
+                'reason' => 'Supplier accepted replacement stock instead',
+            ])
+            ->assertRedirect(route('admin.purchase-returns.show', $purchaseReturn))
+            ->assertSessionHas('success');
+
+        $purchaseReturn->refresh();
+
+        $this->assertTrue($purchaseReturn->isReversed());
+        $this->assertSame('reversed', $purchaseReturn->workflow_status);
+        $this->assertSame('Supplier accepted replacement stock instead', $purchaseReturn->reversal_reason);
+        $this->assertSame($user->id, $purchaseReturn->reversed_by);
+
+        $netStock = InventoryLedger::query()
+            ->where('product_id', $product->id)
+            ->where('batch_no', 'REV-BATCH-1')
+            ->where('location_type', 'warehouse')
+            ->where('location_id', 0)
+            ->get()
+            ->sum(fn (InventoryLedger $ledger) => (float) $ledger->qty_in - (float) $ledger->qty_out);
+
+        $this->assertSame(5.0, round((float) $netStock, 2));
+
+        $this->assertDatabaseHas('inventory_ledgers', [
+            'product_id' => $product->id,
+            'batch_no' => 'REV-BATCH-1',
+            'transaction_type' => 'ADJUSTMENT',
+            'reference_type' => 'purchase_return',
+            'reference_id' => $purchaseReturn->id,
+            'qty_in' => 1,
+            'qty_out' => 0,
+        ]);
+
+        $this->assertDatabaseHas('financial_ledgers', [
+            'ledgerable_type' => Supplier::class,
+            'ledgerable_id' => $supplier->id,
+            'transaction_type' => 'PURCHASE_RETURN_REVERSAL',
+            'credit' => 112,
+            'reference_type' => PurchaseReturn::class,
+            'reference_id' => $purchaseReturn->id,
+        ]);
+    }
+
+    public function test_reversed_purchase_return_is_ignored_for_future_invoice_prefill_capacity(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+
+        $supplier = Supplier::create([
+            'name' => 'Reversed Capacity Supplier',
+            'is_active' => true,
+        ]);
+
+        $product = $this->createProduct($support, [
+            'product_name' => 'Reversed Capacity Product',
+            'sku' => 'RET-REV-CAP-001',
+        ]);
+
+        $invoice = PurchaseInvoice::create([
+            'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-0202',
+            'supplier_id' => $supplier->id,
+            'invoice_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 200,
+            'discount_amount' => 0,
+            'sgst_amount' => 12,
+            'cgst_amount' => 12,
+            'igst_amount' => 0,
+            'round_off' => 0,
+            'total_amount' => 224,
+            'tax_type' => 'intra_state',
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+
+        $invoice->items()->create([
+            'product_id' => $product->id,
+            'hsn_id' => $product->hsn_id ?? 1,
+            'batch_no' => 'REV-CAP-BATCH-1',
+            'expiry_date' => now()->addMonths(9)->toDateString(),
+            'mfg_date' => now()->subMonths(2)->toDateString(),
+            'qty' => 2,
+            'free_qty' => 0,
+            'unit' => 'pcs',
+            'mrp' => 120,
+            'rate' => 100,
+            'discount_percent' => 0,
+            'discount_amount' => 0,
+            'gst_percent' => 12,
+            'gst_amount' => 24,
+            'taxable_amount' => 200,
+            'total_amount' => 224,
+        ]);
+
+        $purchaseReturn = PurchaseReturn::create([
+            'return_number' => 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0202',
+            'supplier_id' => $supplier->id,
+            'purchase_invoice_id' => $invoice->id,
+            'return_date' => now()->toDateString(),
+            'financial_year' => PurchaseInvoice::currentFinancialYear(),
+            'subtotal' => 200,
+            'sgst_amount' => 12,
+            'cgst_amount' => 12,
+            'igst_amount' => 0,
+            'total_amount' => 224,
+            'status' => 'approved',
+            'created_by' => $user->id,
+            'approved_by' => $user->id,
+            'reversed_by' => $user->id,
+            'reversed_at' => now(),
+            'reversal_reason' => 'Supplier declined the pickup',
+            'workflow_status' => 'reversed',
+        ]);
+
+        $purchaseReturn->items()->create([
+            'product_id' => $product->id,
+            'hsn_id' => $product->hsn_id ?? 1,
+            'batch_no' => 'REV-CAP-BATCH-1',
+            'expiry_date' => now()->addMonths(9)->toDateString(),
+            'qty' => 2,
+            'rate' => 100,
+            'gst_percent' => 12,
+            'gst_amount' => 24,
+            'total_amount' => 224,
+        ]);
+
+        $this->actingAs($user)
+            ->get(route('admin.purchase-returns.create', ['purchase_invoice_id' => $invoice->id]))
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('Procurement/PurchaseReturns/CreateEdit')
+                ->where('prefillInvoice.id', $invoice->id)
+                ->where('prefillInvoice.items.0.batch_no', 'REV-CAP-BATCH-1')
+                ->where('prefillInvoice.items.0.max_qty', 2)
+                ->where('prefillInvoice.items.0.qty', 2)
+            );
     }
 
     private function makeSuperAdminUser(): User

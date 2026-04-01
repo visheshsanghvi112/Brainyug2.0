@@ -28,6 +28,7 @@ class Supplier extends Model
     public function district() { return $this->belongsTo(District::class); }
     public function purchaseInvoices() { return $this->hasMany(PurchaseInvoice::class); }
     public function purchaseReturns() { return $this->hasMany(PurchaseReturn::class); }
+    public function paymentAllocations() { return $this->hasMany(SupplierPaymentAllocation::class); }
     public function financialLedgers() { return $this->morphMany(FinancialLedger::class, 'ledgerable'); }
 
     public function scopeActive($q) { return $q->where('is_active', true); }
