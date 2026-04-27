@@ -14,6 +14,13 @@ const monthFilter = ref(props.months);
 watch(monthFilter, (val) => {
     router.get(route('reports.stock.expiry'), { months: val }, { preserveState: true });
 });
+
+function exportReport(format) {
+    window.location.href = route('reports.stock.expiry', {
+        months: monthFilter.value,
+        format,
+    });
+}
 </script>
 
 <template>
@@ -34,6 +41,9 @@ watch(monthFilter, (val) => {
                         <option :value="6">Next 6 months</option>
                         <option :value="12">Next 12 months</option>
                     </select>
+                    <button class="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700" @click="exportReport('csv')">CSV</button>
+                    <button class="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700" @click="exportReport('excel')">Excel</button>
+                    <button class="rounded-lg bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white" @click="exportReport('pdf')">PDF</button>
                 </div>
             </div>
         </template>

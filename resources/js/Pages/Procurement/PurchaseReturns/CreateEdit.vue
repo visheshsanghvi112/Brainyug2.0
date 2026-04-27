@@ -27,6 +27,7 @@ const prefillItems = props.prefillInvoice?.items?.length
 const form = useForm({
     supplier_id: props.prefillInvoice?.supplier_id || '',
     purchase_invoice_id: props.prefillInvoice?.id || '',
+    source_invoice_ids: props.prefillInvoice?.id ? [props.prefillInvoice.id] : [],
     return_date: new Date().toISOString().split('T')[0],
     reason: '',
     items: prefillItems || [
@@ -46,6 +47,15 @@ function removeItem(index) {
 
 function submit() {
     form.post(route('admin.purchase-returns.store'));
+}
+
+function normalizeSourceInvoiceIds() {
+    const uniqueIds = [...new Set((form.source_invoice_ids || []).map((id) => Number(id)).filter(Boolean))];
+    form.source_invoice_ids = uniqueIds;
+
+    if (form.purchase_invoice_id && !uniqueIds.includes(Number(form.purchase_invoice_id))) {
+        form.source_invoice_ids = [Number(form.purchase_invoice_id), ...uniqueIds];
+    }
 }
 </script>
 
@@ -85,10 +95,17 @@ function submit() {
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Link to Invoice</label>
-                                <select v-model="form.purchase_invoice_id" :disabled="!!prefillInvoice" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white disabled:opacity-70">
+                                <select v-model="form.purchase_invoice_id" :disabled="!!prefillInvoice" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white disabled:opacity-70" @change="normalizeSourceInvoiceIds">
                                     <option value="">No specific invoice</option>
                                     <option v-for="inv in invoices" :key="inv.id" :value="inv.id">{{ inv.invoice_number }}</option>
                                 </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Source Invoices (Multi-select)</label>
+                                <select v-model="form.source_invoice_ids" multiple :disabled="!!prefillInvoice" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-white disabled:opacity-70 min-h-[112px]" @change="normalizeSourceInvoiceIds">
+                                    <option v-for="inv in invoices" :key="inv.id" :value="inv.id">{{ inv.invoice_number }}</option>
+                                </select>
+                                <p class="mt-1 text-xs text-gray-500">Pick one or more approved supplier invoices to enable multi-source return validation.</p>
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Return Date *</label>

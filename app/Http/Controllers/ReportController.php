@@ -149,9 +149,9 @@ class ReportController extends Controller
                     $stockVal = (float)$row->stock * (float)$row->mrp;
                     fputcsv($file, [
                         $row->product_id,
-                        $row->product->product_name,
-                        $row->product->company->name ?? '',
-                        $row->product->category->name ?? '',
+                        $row->product?->product_name ?? 'Unknown',
+                        $row->product?->company?->name ?? '',
+                        $row->product?->category?->name ?? '',
                         $row->batch_no,
                         $row->expiry_date ? $row->expiry_date->format('Y-m-d') : '',
                         $row->mrp,
@@ -176,7 +176,7 @@ class ReportController extends Controller
             'location' => [
                 'type' => $locationType,
                 'id' => $locationId,
-                'name' => $locationType === 'warehouse' ? 'HO Warehouse' : (Franchisee::find($locationId)->shop_name ?? 'Unknown')
+                'name' => $locationType === 'warehouse' ? 'HO Warehouse' : (Franchisee::find($locationId)?->shop_name ?? 'Unknown')
             ],
             'franchisees' => $franchiseesQuery->get(),
             'filters' => $request->only(['location_type', 'location_id']),
@@ -211,8 +211,66 @@ class ReportController extends Controller
             });
         }
 
+        $expired = $query->get();
+
+        // Add export functionality
+        if ($format = $this->requestedExportFormat($request)) {
+            $headers = ['Product', 'SKU', 'Batch', 'Expiry Date', 'Location', 'Stock'];
+            $rows = $expired->map(fn($item) => [
+                $item->product?->product_name ?? 'Unknown',
+                $item->product?->sku ?? '-',
+                $item->batch_no,
+                optional($item->expiry_date)?->format('Y-m-d'),
+                "{$item->location_type}: {$item->location_id}",
+                (float) $item->stock,
+            ])->all();
+
+            $meta = [
+                'Report Date' => now()->format('Y-m-d'),
+                'Expiry Threshold (Months)' => $months,
+                'Total Items' => count($rows),
+                'Expiry Date Range' => 'Now to ' . $threshold->format('Y-m-d'),
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'stock_expiry',
+                    sheetTitle: 'Stock Expiry Report',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'stock_expiry',
+                    title: 'Stock Expiry Report',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($expired, $headers) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($expired as $item) {
+                    fputcsv($file, [
+                        $item->product?->product_name ?? 'Unknown',
+                        $item->product?->sku ?? '-',
+                        $item->batch_no,
+                        optional($item->expiry_date)?->format('Y-m-d'),
+                        "{$item->location_type}: {$item->location_id}",
+                        $item->stock,
+                    ]);
+                }
+                fclose($file);
+            }, "stock_expiry_" . date('Ymd_His') . ".csv");
+        }
+
         return Inertia::render('Reports/Stock/Expiry', [
-            'expired' => $query->get(),
+            'expired' => $expired,
             'months' => $months,
         ]);
     }
@@ -251,6 +309,60 @@ class ReportController extends Controller
                 $q->where('location_type', 'franchisee')
                   ->whereIn('location_id', $allowedIds);
             });
+        }
+
+        // Add export functionality
+        if ($format = $this->requestedExportFormat($request)) {
+            $allStock = (clone $query)->get();
+
+            $headers = ['Location Type', 'Location ID', 'Product Name', 'Current Stock'];
+            $rows = $allStock->map(fn($item) => [
+                ucfirst($item->location_type),
+                (string) $item->location_id,
+                $item->product?->product_name ?? 'Unknown',
+                (float) $item->current_stock,
+            ])->all();
+
+            $meta = [
+                'Report Date' => now()->format('Y-m-d'),
+                'No Sales For (Days)' => $days,
+                'Total Items' => count($rows),
+                'Threshold Date' => $threshold->format('Y-m-d'),
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'stock_nonmoving',
+                    sheetTitle: 'Non-Moving Stock',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'stock_nonmoving',
+                    title: 'Non-Moving Stock Report',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($allStock, $headers) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($allStock as $item) {
+                    fputcsv($file, [
+                        ucfirst($item->location_type),
+                        $item->location_id,
+                        $item->product?->product_name ?? 'Unknown',
+                        $item->current_stock,
+                    ]);
+                }
+                fclose($file);
+            }, "stock_nonmoving_" . date('Ymd_His') . ".csv");
         }
 
         return Inertia::render('Reports/Stock/NonMoving', [
@@ -752,6 +864,235 @@ class ReportController extends Controller
     }
 
     /**
+     * TDS report from commission entries where deduction is applicable.
+     */
+    public function tds(Request $request)
+    {
+        $this->authorize('view reports');
+
+        $startDate = $request->input('start_date', Carbon::now()->startOfMonth()->toDateString());
+        $endDate = $request->input('end_date', Carbon::now()->toDateString());
+
+        $query = DB::table('commissions as c')
+            ->join('users as u', 'u.id', '=', 'c.user_id')
+            ->leftJoin('dist_orders as d', 'd.id', '=', 'c.dist_order_id')
+            ->whereDate('c.created_at', '>=', $startDate)
+            ->whereDate('c.created_at', '<=', $endDate)
+            ->where('c.tds_amount', '>', 0)
+            ->when($request->filled('status'), fn ($q) => $q->where('c.status', $request->input('status')))
+            ->when($request->filled('type'), fn ($q) => $q->where('c.type', $request->input('type')))
+            ->when($request->filled('user_id'), fn ($q) => $q->where('c.user_id', (int) $request->input('user_id')))
+            ->select(
+                'c.id',
+                'c.created_at',
+                'c.type',
+                'c.status',
+                'c.base_amount',
+                'c.commission_percent',
+                'c.gross_commission',
+                'c.tds_percent',
+                'c.tds_amount',
+                'c.net_payable',
+                'u.name as user_name',
+                'd.order_number'
+            )
+            ->orderByDesc('c.created_at');
+
+        $totals = (clone $query)
+            ->selectRaw('COUNT(*) as entries, COALESCE(SUM(c.gross_commission), 0) as gross, COALESCE(SUM(c.tds_amount), 0) as tds, COALESCE(SUM(c.net_payable), 0) as net')
+            ->first();
+
+        $summary = [
+            'entries' => (int) ($totals->entries ?? 0),
+            'gross' => round((float) ($totals->gross ?? 0), 2),
+            'tds' => round((float) ($totals->tds ?? 0), 2),
+            'net' => round((float) ($totals->net ?? 0), 2),
+        ];
+
+        $format = $this->requestedExportFormat($request);
+        if ($format) {
+            $rows = (clone $query)->get();
+            $headers = ['Date', 'User', 'Order Ref', 'Type', 'Status', 'Base Amount', 'Commission %', 'Gross Commission', 'TDS %', 'TDS Amount', 'Net Payable'];
+            $exportRows = $rows->map(fn ($row) => [
+                optional(Carbon::parse($row->created_at))->format('Y-m-d'),
+                $row->user_name,
+                $row->order_number ?: '-',
+                $row->type,
+                $row->status,
+                round((float) $row->base_amount, 2),
+                round((float) $row->commission_percent, 2),
+                round((float) $row->gross_commission, 2),
+                round((float) $row->tds_percent, 2),
+                round((float) $row->tds_amount, 2),
+                round((float) $row->net_payable, 2),
+            ])->all();
+
+            $meta = [
+                'From Date' => $startDate,
+                'To Date' => $endDate,
+                'Entries' => $summary['entries'],
+                'Gross Commission' => $summary['gross'],
+                'Total TDS' => $summary['tds'],
+                'Net Payable' => $summary['net'],
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'tds_report',
+                    sheetTitle: 'TDS Report',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'tds_report',
+                    title: 'TDS Deduction Report',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($headers, $exportRows) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($exportRows as $row) {
+                    fputcsv($file, $row);
+                }
+                fclose($file);
+            }, 'tds_report_' . date('Ymd_His') . '.csv');
+        }
+
+        return Inertia::render('Reports/Compliance/Tds', [
+            'rows' => $query->paginate(30)->withQueryString(),
+            'summary' => $summary,
+            'filters' => $request->only(['start_date', 'end_date', 'status', 'type', 'user_id']),
+            'users' => User::query()->select('id', 'name')->orderBy('name')->get(),
+        ]);
+    }
+
+    /**
+     * E-waybill dispatch report from B2B distribution orders.
+     */
+    public function ewaybill(Request $request)
+    {
+        $this->authorize('view reports');
+
+        $startDate = $request->input('start_date', Carbon::now()->startOfMonth()->toDateString());
+        $endDate = $request->input('end_date', Carbon::now()->toDateString());
+
+        $query = DB::table('dist_orders as d')
+            ->join('franchisees as f', 'f.id', '=', 'd.franchisee_id')
+            ->whereIn('d.status', ['dispatched', 'delivered'])
+            ->whereDate(DB::raw('COALESCE(d.dispatch_date, DATE(d.dispatched_at), DATE(d.created_at))'), '>=', $startDate)
+            ->whereDate(DB::raw('COALESCE(d.dispatch_date, DATE(d.dispatched_at), DATE(d.created_at))'), '<=', $endDate)
+            ->when($request->filled('status'), fn ($q) => $q->where('d.status', $request->input('status')))
+            ->when($request->filled('has_ewaybill'), function ($q) use ($request) {
+                if ($request->input('has_ewaybill') === 'yes') {
+                    $q->whereNotNull('d.ebill_number')->where('d.ebill_number', '!=', '');
+                }
+                if ($request->input('has_ewaybill') === 'no') {
+                    $q->where(function ($inner) {
+                        $inner->whereNull('d.ebill_number')->orWhere('d.ebill_number', '');
+                    });
+                }
+            })
+            ->select(
+                'd.id',
+                'd.order_number',
+                'd.status',
+                'd.dispatch_date',
+                'd.dispatched_at',
+                'd.total_amount',
+                'd.courier_name',
+                'd.tracking_number',
+                'd.invoice_number',
+                'd.ebill_number',
+                'f.shop_name',
+                'f.shop_code'
+            )
+            ->orderByDesc('d.dispatched_at')
+            ->orderByDesc('d.id');
+
+        $totals = (clone $query)
+            ->selectRaw('COUNT(*) as orders, COALESCE(SUM(d.total_amount), 0) as dispatch_value')
+            ->selectRaw("COALESCE(SUM(CASE WHEN d.ebill_number IS NOT NULL AND d.ebill_number != '' THEN 1 ELSE 0 END), 0) as with_ewaybill")
+            ->first();
+
+        $summary = [
+            'orders' => (int) ($totals->orders ?? 0),
+            'dispatch_value' => round((float) ($totals->dispatch_value ?? 0), 2),
+            'with_ewaybill' => (int) ($totals->with_ewaybill ?? 0),
+            'missing_ewaybill' => max(0, (int) (($totals->orders ?? 0) - ($totals->with_ewaybill ?? 0))),
+        ];
+
+        $format = $this->requestedExportFormat($request);
+        if ($format) {
+            $rows = (clone $query)->get();
+            $headers = ['Dispatch Date', 'Order Number', 'Franchisee', 'Shop Code', 'Status', 'Invoice Number', 'E-waybill Number', 'Courier', 'Tracking Number', 'Total Amount'];
+            $exportRows = $rows->map(fn ($row) => [
+                $row->dispatch_date ?: optional($row->dispatched_at ? Carbon::parse($row->dispatched_at) : null)->toDateString(),
+                $row->order_number,
+                $row->shop_name,
+                $row->shop_code,
+                $row->status,
+                $row->invoice_number ?: '-',
+                $row->ebill_number ?: 'MISSING',
+                $row->courier_name ?: '-',
+                $row->tracking_number ?: '-',
+                round((float) $row->total_amount, 2),
+            ])->all();
+
+            $meta = [
+                'From Date' => $startDate,
+                'To Date' => $endDate,
+                'Dispatch Orders' => $summary['orders'],
+                'With E-waybill' => $summary['with_ewaybill'],
+                'Missing E-waybill' => $summary['missing_ewaybill'],
+                'Dispatch Value' => $summary['dispatch_value'],
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'ewaybill_report',
+                    sheetTitle: 'E-waybill Report',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'ewaybill_report',
+                    title: 'E-waybill Dispatch Report',
+                    headers: $headers,
+                    rows: $exportRows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($headers, $exportRows) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($exportRows as $row) {
+                    fputcsv($file, $row);
+                }
+                fclose($file);
+            }, 'ewaybill_report_' . date('Ymd_His') . '.csv');
+        }
+
+        return Inertia::render('Reports/Compliance/Ewaybill', [
+            'rows' => $query->paginate(30)->withQueryString(),
+            'summary' => $summary,
+            'filters' => $request->only(['start_date', 'end_date', 'status', 'has_ewaybill']),
+        ]);
+    }
+
+    /**
      * Supports `export=true` (legacy CSV), `export_format=csv|excel|pdf`, and `format=...`.
      */
     private function requestedExportFormat(Request $request): ?string
@@ -961,15 +1302,73 @@ class ReportController extends Controller
                 DB::raw('SUM(sit.taxable_amount) as total_revenue')
             )
             ->groupBy('p.id', 'p.product_name', 'p.sku')
-            ->orderByDesc('total_revenue')
-            ->limit(20);
+            ->orderByDesc('total_revenue');
 
         if ($allowedIds !== null) {
             $query->whereIn('si.franchisee_id', $allowedIds);
         }
 
+        $allProducts = $query->get();
+
+        // Add export functionality
+        if ($format = $this->requestedExportFormat($request)) {
+            $headers = ['Product Name', 'SKU', 'Units Sold', 'Total Revenue'];
+            $rows = $allProducts->map(fn($item) => [
+                $item->product_name,
+                $item->sku,
+                (float) $item->total_units_sold,
+                round((float) $item->total_revenue, 2),
+            ])->all();
+
+            $totalUnits = $allProducts->sum('total_units_sold');
+            $totalRevenue = $allProducts->sum('total_revenue');
+
+            $meta = [
+                'Report Date' => now()->format('Y-m-d'),
+                'Period (Days)' => $days,
+                'Total Products' => $allProducts->count(),
+                'Total Units Sold' => (float) $totalUnits,
+                'Total Revenue' => round((float) $totalRevenue, 2),
+                'Average Units per Product' => round((float) $totalUnits / max(1, $allProducts->count()), 2),
+            ];
+
+            if ($format === 'excel') {
+                return $this->reportExportService->downloadExcel(
+                    fileBase: 'top_products',
+                    sheetTitle: 'Top Products',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            if ($format === 'pdf') {
+                return $this->reportExportService->downloadPdf(
+                    fileBase: 'top_products',
+                    title: 'Top Selling Products Report',
+                    headers: $headers,
+                    rows: $rows,
+                    meta: $meta,
+                );
+            }
+
+            return response()->streamDownload(function () use ($allProducts, $headers) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $headers);
+                foreach ($allProducts as $item) {
+                    fputcsv($file, [
+                        $item->product_name,
+                        $item->sku,
+                        $item->total_units_sold,
+                        $item->total_revenue,
+                    ]);
+                }
+                fclose($file);
+            }, "top_products_" . date('Ymd_His') . ".csv");
+        }
+
         return Inertia::render('Reports/BI/TopProducts', [
-            'products' => $query->get(),
+            'products' => $allProducts->take(20)->values(),
             'days' => $days
         ]);
     }

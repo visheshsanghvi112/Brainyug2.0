@@ -28,6 +28,11 @@ class PurchaseReturn extends Model
 
     public function supplier() { return $this->belongsTo(Supplier::class); }
     public function purchaseInvoice() { return $this->belongsTo(PurchaseInvoice::class); }
+    public function sourceInvoices()
+    {
+        return $this->belongsToMany(PurchaseInvoice::class, 'purchase_return_source_invoices')
+            ->withTimestamps();
+    }
     public function items() { return $this->hasMany(PurchaseReturnItem::class); }
     public function createdBy() { return $this->belongsTo(User::class, 'created_by'); }
     public function approvedBy() { return $this->belongsTo(User::class, 'approved_by'); }

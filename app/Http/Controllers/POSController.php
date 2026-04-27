@@ -23,6 +23,7 @@ use App\Services\LedgerService;
 use App\Models\Franchisee;
 use App\Models\InventoryLedger;
 use App\Models\User;
+use App\Events\SaleCompleted;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
@@ -1606,6 +1607,9 @@ class POSController extends Controller
             if (!empty($validated['override_cache_key'])) {
                 Cache::forget((string) $validated['override_cache_key']);
             }
+
+            // Dispatch event to trigger reorder suggestions and other post-sale hooks
+            SaleCompleted::dispatch($invoice, $franchiseeId);
 
                 return response()->json([
                     'success'  => true,

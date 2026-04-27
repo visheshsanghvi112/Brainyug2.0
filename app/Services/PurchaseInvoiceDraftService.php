@@ -12,15 +12,16 @@ class PurchaseInvoiceDraftService
     {
         return DB::transaction(function () use ($validated, $actorId) {
             [$invoicePayload, $itemsData] = $this->buildDraftPayload($validated);
+            $financialYear = PurchaseInvoice::financialYearForDate($validated['invoice_date']);
 
-            $lastInvoice = PurchaseInvoice::where('financial_year', PurchaseInvoice::currentFinancialYear())
+            $lastInvoice = PurchaseInvoice::where('financial_year', $financialYear)
                 ->orderByDesc('id')
                 ->first();
             $nextNum = $lastInvoice ? ((int) substr($lastInvoice->invoice_number, -4)) + 1 : 1;
 
             $invoice = PurchaseInvoice::create(array_merge($invoicePayload, [
-                'invoice_number' => 'PI-' . PurchaseInvoice::currentFinancialYear() . '-' . str_pad($nextNum, 4, '0', STR_PAD_LEFT),
-                'financial_year' => PurchaseInvoice::currentFinancialYear(),
+                'invoice_number' => 'PI-' . $financialYear . '-' . str_pad($nextNum, 4, '0', STR_PAD_LEFT),
+                'financial_year' => $financialYear,
                 'status' => 'draft',
                 'created_by' => $actorId,
             ]));

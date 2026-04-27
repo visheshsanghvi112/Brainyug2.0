@@ -1,29 +1,50 @@
 <script setup>
 import { Head, useForm, Link } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
+import { computed } from 'vue';
 
 const props = defineProps({
-    categories: Array
+    categories: Array,
+    expense: {
+        type: Object,
+        default: null,
+    },
 });
+
+const isEdit = computed(() => Boolean(props.expense));
 
 const form = useForm({
-    expense_category_id: '',
-    expense_date: new Date().toISOString().split('T')[0],
-    vendor_name: '',
-    amount: 0,
-    gst_amount: 0,
-    payment_mode: 'cash',
-    narration: ''
+    expense_category_id: props.expense?.expense_category_id || '',
+    expense_date: props.expense?.expense_date || new Date().toISOString().split('T')[0],
+    vendor_name: props.expense?.vendor_name || '',
+    amount: Number(props.expense?.amount || 0),
+    gst_amount: Number(props.expense?.gst_amount || 0),
+    payment_mode: props.expense?.payment_mode || 'cash',
+    narration: props.expense?.narration || '',
+    status: props.expense?.status || 'approved',
+    is_tds_applicable: Boolean(props.expense?.is_tds_applicable || false),
+    tds_percent: Number(props.expense?.tds_percent || 0),
 });
 
-const submit = () => form.post(route('expenses.store'));
+const grossAmount = computed(() => Number(form.amount || 0) + Number(form.gst_amount || 0));
+const tdsAmountPreview = computed(() => form.is_tds_applicable ? (grossAmount.value * Number(form.tds_percent || 0) / 100) : 0);
+const netAmountPreview = computed(() => Math.max(0, grossAmount.value - tdsAmountPreview.value));
+
+const submit = () => {
+    if (isEdit.value) {
+        form.put(route('expenses.update', props.expense.id));
+        return;
+    }
+
+    form.post(route('expenses.store'));
+};
 </script>
 
 <template>
-    <Head title="Log Operational Expense" />
+    <Head :title="isEdit ? 'Edit Operational Expense' : 'Log Operational Expense'" />
     <AuthenticatedLayout>
         <template #header>
-            <h2 class="text-2xl font-bold text-gray-900 border-l-4 border-rose-500 pl-4">Log New Expense</h2>
+            <h2 class="text-2xl font-bold text-gray-900 border-l-4 border-rose-500 pl-4">{{ isEdit ? 'Edit Expense' : 'Log New Expense' }}</h2>
         </template>
 
         <div class="max-w-3xl">
@@ -59,6 +80,23 @@ const submit = () => form.post(route('expenses.store'));
                         </div>
                     </div>
 
+                    <div class="grid grid-cols-2 gap-6">
+                        <div>
+                            <label class="block text-sm font-bold text-gray-700 mb-2">Status</label>
+                            <select v-model="form.status" class="w-full border-gray-300 rounded-lg focus:ring-rose-500 shadow-sm">
+                                <option value="pending">Pending</option>
+                                <option value="approved">Approved</option>
+                                <option value="rejected">Rejected</option>
+                            </select>
+                        </div>
+                        <div class="flex items-end">
+                            <label class="inline-flex items-center gap-2 text-sm font-semibold text-gray-700">
+                                <input v-model="form.is_tds_applicable" type="checkbox" class="rounded border-gray-300 text-rose-600 focus:ring-rose-500" />
+                                TDS Applicable
+                            </label>
+                        </div>
+                    </div>
+
                     <div class="grid grid-cols-2 gap-6 bg-rose-50/50 p-6 rounded-xl border border-rose-100">
                         <div>
                             <label class="block text-sm font-bold text-gray-700 mb-2">Base Amount (Excl. GST)</label>
@@ -74,9 +112,23 @@ const submit = () => form.post(route('expenses.store'));
                                 <input type="number" step="0.01" v-model="form.gst_amount" class="w-full border-gray-300 rounded-lg pl-8 focus:ring-rose-500 shadow-sm" placeholder="0.00">
                             </div>
                         </div>
+                        <div>
+                            <label class="block text-sm font-bold text-gray-700 mb-2">TDS %</label>
+                            <div class="relative">
+                                <input type="number" step="0.01" min="0" max="100" v-model="form.tds_percent" :disabled="!form.is_tds_applicable" class="w-full border-gray-300 rounded-lg focus:ring-rose-500 shadow-sm disabled:bg-gray-100" placeholder="0.00">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-bold text-gray-700 mb-2">TDS Amount (Preview)</label>
+                            <div class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 font-bold text-amber-700">₹ {{ tdsAmountPreview.toFixed(2) }}</div>
+                        </div>
                         <div class="col-span-2 pt-2 border-t border-rose-100 mt-2 flex justify-between items-center">
                             <span class="text-sm font-bold text-rose-800 uppercase tracking-wider">Total Expense Value</span>
-                            <span class="text-2xl font-mono font-bold text-rose-700">₹ {{ (Number(form.amount) + Number(form.gst_amount)).toFixed(2) }}</span>
+                            <span class="text-2xl font-mono font-bold text-rose-700">₹ {{ grossAmount.toFixed(2) }}</span>
+                        </div>
+                        <div class="col-span-2 pt-2 border-t border-rose-100 mt-2 flex justify-between items-center">
+                            <span class="text-sm font-bold text-emerald-800 uppercase tracking-wider">Net Amount After TDS</span>
+                            <span class="text-2xl font-mono font-bold text-emerald-700">₹ {{ netAmountPreview.toFixed(2) }}</span>
                         </div>
                     </div>
 
@@ -89,7 +141,7 @@ const submit = () => form.post(route('expenses.store'));
                 <div class="bg-gray-50 px-8 py-5 flex justify-end gap-3 border-t border-gray-100">
                     <Link :href="route('expenses.index')" class="px-6 py-2 text-sm font-semibold text-gray-600 hover:text-gray-900">Cancel</Link>
                     <button type="submit" class="bg-rose-600 text-white px-10 py-2 rounded-lg font-bold shadow-lg shadow-rose-200 hover:bg-rose-700 transform transition active:scale-95 disabled:opacity-50" :disabled="form.processing">
-                        {{ form.processing ? 'Saving...' : 'Post Expense' }}
+                        {{ form.processing ? 'Saving...' : (isEdit ? 'Update Expense' : 'Post Expense') }}
                     </button>
                 </div>
             </form>

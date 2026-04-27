@@ -6,6 +6,7 @@ use App\Models\PurchaseInvoice;
 use App\Models\PurchaseReturn;
 use App\Models\PurchaseReturnItem;
 use App\Models\User;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -21,7 +22,7 @@ class PurchaseReturnLifecycleService
         DB::transaction(function () use ($purchaseReturn, $actor) {
             $lockedReturn = PurchaseReturn::whereKey($purchaseReturn->id)
                 ->lockForUpdate()
-                ->with(['items', 'supplier', 'purchaseInvoice.items'])
+                ->with(['items', 'supplier', 'purchaseInvoice.items', 'sourceInvoices.items'])
                 ->firstOrFail();
 
             if ($lockedReturn->status !== 'draft') {
@@ -36,10 +37,15 @@ class PurchaseReturnLifecycleService
                 ]);
             }
 
-            if ($lockedReturn->purchaseInvoice) {
-                if ($lockedReturn->purchaseInvoice->status !== 'approved') {
+            $sourceInvoices = $lockedReturn->sourceInvoices;
+            if ($sourceInvoices->isEmpty() && $lockedReturn->purchaseInvoice) {
+                $sourceInvoices = collect([$lockedReturn->purchaseInvoice]);
+            }
+
+            if ($sourceInvoices->isNotEmpty()) {
+                if ($sourceInvoices->contains(fn ($invoice) => $invoice->status !== 'approved')) {
                     throw ValidationException::withMessages([
-                        'purchase_invoice_id' => 'Linked purchase invoice is no longer approved. Reverse or restore the source invoice before approving this return.',
+                        'purchase_invoice_id' => 'One or more linked source invoices are no longer approved. Reverse or restore the source invoices before approving this return.',
                     ]);
                 }
 
@@ -51,8 +57,8 @@ class PurchaseReturnLifecycleService
                     ];
                 })->all();
 
-                $this->validateInvoiceLinkedReturnItems(
-                    $lockedReturn->purchaseInvoice,
+                $this->validateInvoicesLinkedReturnItems(
+                    $sourceInvoices,
                     $returnItemsPayload,
                     $lockedReturn->id
                 );
@@ -201,17 +207,40 @@ class PurchaseReturnLifecycleService
      */
     public function validateInvoiceLinkedReturnItems(PurchaseInvoice $invoice, array $items, ?int $excludingReturnId = null): void
     {
-        $purchasedByKey = $invoice->items
+        $this->validateInvoicesLinkedReturnItems(collect([$invoice]), $items, $excludingReturnId);
+    }
+
+    public function validateInvoicesLinkedReturnItems(Collection $invoices, array $items, ?int $excludingReturnId = null): void
+    {
+        if ($invoices->isEmpty()) {
+            return;
+        }
+
+        $invoiceIds = $invoices->pluck('id')->map(fn ($id) => (int) $id)->values();
+
+        $purchasedByKey = $invoices
+            ->flatMap(fn ($invoice) => $invoice->items)
             ->groupBy(fn ($item) => $item->product_id . '|' . $item->batch_no)
             ->map(fn ($group) => (float) $group->sum(fn ($item) => (float) $item->qty + (float) $item->free_qty));
 
+        $approvedReturnIds = PurchaseReturn::query()
+            ->where('status', 'approved')
+            ->whereNull('reversed_at')
+            ->where(function ($query) use ($invoiceIds) {
+                $query->whereIn('purchase_invoice_id', $invoiceIds)
+                    ->orWhereExists(function ($exists) use ($invoiceIds) {
+                        $exists->selectRaw('1')
+                            ->from('purchase_return_source_invoices as prsi')
+                            ->whereColumn('prsi.purchase_return_id', 'purchase_returns.id')
+                            ->whereIn('prsi.purchase_invoice_id', $invoiceIds);
+                    });
+            })
+            ->when($excludingReturnId, fn ($query) => $query->where('id', '!=', $excludingReturnId))
+            ->pluck('id');
+
         $alreadyReturnedByKey = PurchaseReturnItem::query()
             ->selectRaw('purchase_return_items.product_id, purchase_return_items.batch_no, COALESCE(SUM(purchase_return_items.qty), 0) as returned_qty')
-            ->join('purchase_returns as pr', 'pr.id', '=', 'purchase_return_items.purchase_return_id')
-            ->where('pr.purchase_invoice_id', $invoice->id)
-            ->where('pr.status', 'approved')
-            ->whereNull('pr.reversed_at')
-            ->when($excludingReturnId, fn ($query) => $query->where('pr.id', '!=', $excludingReturnId))
+            ->whereIn('purchase_return_items.purchase_return_id', $approvedReturnIds)
             ->groupBy('purchase_return_items.product_id', 'purchase_return_items.batch_no')
             ->get()
             ->mapWithKeys(fn ($row) => [
@@ -230,7 +259,7 @@ class PurchaseReturnLifecycleService
 
             if ($purchasedQty <= 0) {
                 [$productId, $batchNo] = explode('|', $key);
-                $errors[] = "Item product {$productId}, batch {$batchNo} does not exist on linked invoice {$invoice->invoice_number}.";
+                $errors[] = "Item product {$productId}, batch {$batchNo} does not exist on selected source invoices.";
                 continue;
             }
 

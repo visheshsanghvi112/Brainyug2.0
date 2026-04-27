@@ -14,6 +14,13 @@ const dayFilter = ref(props.days);
 watch(dayFilter, (val) => {
     router.get(route('reports.bi.top-products'), { days: val }, { preserveState: true });
 });
+
+function exportReport(format) {
+    window.location.href = route('reports.bi.top-products', {
+        days: dayFilter.value,
+        format,
+    });
+}
 </script>
 
 <template>
@@ -34,6 +41,9 @@ watch(dayFilter, (val) => {
                         <option :value="90">Last 90 Days</option>
                         <option :value="365">Last 365 Days</option>
                     </select>
+                    <button class="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700" @click="exportReport('csv')">CSV</button>
+                    <button class="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700" @click="exportReport('excel')">Excel</button>
+                    <button class="rounded-lg bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white" @click="exportReport('pdf')">PDF</button>
                 </div>
             </div>
         </template>

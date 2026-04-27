@@ -16,7 +16,9 @@ use App\Http\Controllers\SalesReturnController;
 use App\Http\Controllers\ShopVisitController;
 use App\Http\Controllers\SupportTicketController;
 use App\Http\Controllers\Admin\DistOrderController;
+use App\Http\Controllers\Admin\EmailTemplateController;
 use App\Http\Controllers\Admin\FranchiseeController;
+use App\Http\Controllers\Admin\FranchiseePurchaseController;
 use App\Http\Controllers\Admin\ImpersonationController;
 use App\Http\Controllers\Admin\SupportAccessAuditController;
 use App\Http\Controllers\Auth\ForcedPasswordResetController;
@@ -26,8 +28,10 @@ use App\Http\Controllers\Admin\HsnMasterController;
 use App\Http\Controllers\Admin\MasterCatalogController;
 use App\Http\Controllers\Admin\ProductController;
 use App\Http\Controllers\Admin\PurchaseInvoiceController;
+use App\Http\Controllers\Admin\PurchaseOrderController;
 use App\Http\Controllers\Admin\PurchaseReturnController;
 use App\Http\Controllers\Admin\SaltMasterController;
+use App\Http\Controllers\Admin\StockAlertController;
 use App\Http\Controllers\Admin\StockAdjustmentController;
 use App\Http\Controllers\Admin\SupplierController;
 use App\Http\Controllers\Admin\UserAccessAuditController;
@@ -198,7 +202,20 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
             Route::post('suppliers/{supplier}/payments/{financial_ledger}/reallocate', [SupplierController::class, 'reallocatePayment'])->name('suppliers.payments.reallocate')->whereNumber('supplier')->whereNumber('financial_ledger');
             Route::post('suppliers/{supplier}/payments/{financial_ledger}/reverse', [SupplierController::class, 'reversePayment'])->name('suppliers.payments.reverse')->whereNumber('supplier')->whereNumber('financial_ledger');
 
+            // Purchase Orders (precursor to purchase invoices)
+            Route::get('purchase-orders/export', [PurchaseOrderController::class, 'export'])->name('purchase-orders.export');
+            Route::resource('purchase-orders', PurchaseOrderController::class)
+                ->only(['index', 'create', 'store', 'show', 'edit', 'update', 'destroy'])
+                ->whereNumber('purchase_order');
+            Route::post('purchase-orders/{purchase_order}/approve', [PurchaseOrderController::class, 'approve'])->name('purchase-orders.approve');
+            Route::post('purchase-orders/{purchase_order}/send', [PurchaseOrderController::class, 'send'])->name('purchase-orders.send');
+            Route::post('purchase-orders/{purchase_order}/receive', [PurchaseOrderController::class, 'receive'])->name('purchase-orders.receive');
+            Route::post('purchase-orders/{purchase_order}/convert-to-invoice', [PurchaseOrderController::class, 'convertToInvoice'])->name('purchase-orders.convert-to-invoice');
+            Route::post('purchase-orders/{purchase_order}/cancel', [PurchaseOrderController::class, 'cancel'])->name('purchase-orders.cancel');
+
             Route::get('purchase-invoices/export', [PurchaseInvoiceController::class, 'export'])->name('purchase-invoices.export');
+            Route::get('purchase-invoices/import-template', [PurchaseInvoiceController::class, 'importTemplate'])->name('purchase-invoices.import.template');
+            Route::post('purchase-invoices/import', [PurchaseInvoiceController::class, 'importCsv'])->name('purchase-invoices.import.store');
             Route::resource('purchase-invoices', PurchaseInvoiceController::class)
                 ->only(['index', 'create', 'store', 'show', 'edit', 'update'])
                 ->whereNumber('purchase_invoice');
@@ -218,6 +235,34 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
             // Manual stock correction with full audit trail via InventoryService
             Route::get( 'stock/adjust', [StockAdjustmentController::class, 'index'])->name('stock.adjust');
             Route::post('stock/adjust', [StockAdjustmentController::class, 'store'])->name('stock.adjust.store');
+
+            // Stock alerts operations dashboard (pending/acknowledge/resolve)
+            Route::get('stock-alerts', [StockAlertController::class, 'index'])->name('stock-alerts.index');
+            Route::post('stock-alerts/{stock_alert}/acknowledge', [StockAlertController::class, 'acknowledge'])->name('stock-alerts.acknowledge')->whereNumber('stock_alert');
+
+        });
+
+        // ── Email Template Management  (platform admin only) ──────────────
+        Route::middleware('erp.role:Super Admin|Admin')->group(function () {
+            Route::resource('email-templates', EmailTemplateController::class)
+                ->only(['index', 'create', 'store', 'edit', 'update', 'destroy'])
+                ->whereNumber('email_template');
+        });
+
+        // Franchisee outside purchases (external vendor procurement)
+        Route::middleware('erp.role:Super Admin|Admin|Distributer|Franchisee')->group(function () {
+            Route::resource('franchisee-purchases', FranchiseePurchaseController::class)
+                ->only(['index', 'create', 'store', 'show', 'edit', 'update'])
+                ->whereNumber('franchisee_purchase');
+            Route::post('franchisee-purchases/{franchisee_purchase}/approve', [FranchiseePurchaseController::class, 'approve'])
+                ->name('franchisee-purchases.approve')
+                ->whereNumber('franchisee_purchase');
+            Route::post('franchisee-purchases/{franchisee_purchase}/reject', [FranchiseePurchaseController::class, 'reject'])
+                ->name('franchisee-purchases.reject')
+                ->whereNumber('franchisee_purchase');
+            Route::post('franchisee-purchases/{franchisee_purchase}/cancel', [FranchiseePurchaseController::class, 'cancel'])
+                ->name('franchisee-purchases.cancel')
+                ->whereNumber('franchisee_purchase');
         });
 
         // ── B2B Distribution Orders ─────────────────────────────────────────
@@ -356,7 +401,7 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
     |--------------------------------------------------------------------------
     */
     Route::resource('expenses', ExpenseController::class)
-        ->only(['index', 'create', 'store'])
+        ->only(['index', 'create', 'store', 'edit', 'update'])
         ->middleware('erp.role:Franchisee|Super Admin|Admin|Account')
         ->whereNumber('expense');
 
@@ -479,6 +524,12 @@ Route::middleware(['auth', '2fa', 'force.password.reset', 'erp.module'])->group(
                 Route::get('/gst/gstr1',  [ReportController::class, 'gstr1'])->name('gst.gstr1');
                 Route::get('/gst/gstr2',  [ReportController::class, 'gstr2'])->name('gst.gstr2');
                 Route::get('/gst/gstr3b', [ReportController::class, 'gstr3b'])->name('gst.gstr3b');
+                Route::get('/compliance/tds', [ReportController::class, 'tds'])->name('compliance.tds');
+            });
+
+        Route::middleware('erp.role:Super Admin|Admin|Account|Distributer|Sales Team')
+            ->group(function () {
+                Route::get('/compliance/ewaybill', [ReportController::class, 'ewaybill'])->name('compliance.ewaybill');
             });
 
         // MIS / Business Intelligence — HO + territory heads only

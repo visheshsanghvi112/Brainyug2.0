@@ -127,9 +127,12 @@ const navigation = computed(() => {
 
         // Procurement
         { name: 'Suppliers', href: route('admin.suppliers.index'), icon: UsersIcon, current: route().current('admin.suppliers.*'), show: hasModuleAccess('suppliers'), category: 'Procurement' },
+        { name: 'Purchase Orders', href: route('admin.purchase-orders.index'), icon: ClipboardDocumentCheckIcon, current: route().current('admin.purchase-orders.*'), show: hasModuleAccess('purchase_orders'), category: 'Procurement' },
         { name: 'Purchase Invoices', href: route('admin.purchase-invoices.index'), icon: ClipboardDocumentCheckIcon, current: route().current('admin.purchase-invoices.*'), show: hasModuleAccess('purchase_invoices'), category: 'Procurement' },
         { name: 'Purchase Returns', href: route('admin.purchase-returns.index'), icon: ReceiptRefundIcon, current: route().current('admin.purchase-returns.*'), show: hasModuleAccess('purchase_returns'), category: 'Procurement' },
+        { name: 'Outside Purchases', href: route('admin.franchisee-purchases.index'), icon: ClipboardDocumentListIcon, current: route().current('admin.franchisee-purchases.*'), show: hasModuleAccess('franchisee_purchases'), category: 'Procurement' },
         { name: 'Stock Adjustment', href: route('admin.stock.adjust'), icon: ArchiveBoxIcon, current: route().current('admin.stock.adjust*'), show: hasModuleAccess('stock_adjustment'), category: 'Procurement' },
+        { name: 'Stock Alerts', href: route('admin.stock-alerts.index'), icon: ClipboardDocumentListIcon, current: route().current('admin.stock-alerts.*'), show: hasModuleAccess('stock_adjustment'), category: 'Procurement' },
 
         // Operations
         { name: 'Order from HO (Cart)', href: route('b2b.cart.index'), icon: ShoppingBagIcon, current: route().current('b2b.cart.*'), show: hasModuleAccess('b2b_cart'), category: 'Operations' },
@@ -145,6 +148,7 @@ const navigation = computed(() => {
         { name: 'Support Tickets', href: route('tickets.index'), icon: DocumentTextIcon, current: route().current('tickets.*'), show: hasModuleAccess('tickets'), category: 'Communication' },
         { name: 'Meetings', href: route('meetings.index'), icon: ChartBarSquareIcon, current: route().current('meetings.*'), show: hasModuleAccess('meetings'), category: 'Communication' },
         { name: 'Notice Board', href: route('announcements.index'), icon: MegaphoneIcon, current: route().current('announcements.*'), show: hasModuleAccess('meetings'), category: 'Communication' },
+        { name: 'Email Templates', href: route('admin.email-templates.index'), icon: DocumentTextIcon, current: route().current('admin.email-templates.*'), show: hasModuleAccess('email_templates'), category: 'Communication' },
         { name: 'Shop Visit Audits', href: route('shop-visits.index'), icon: ClipboardDocumentCheckIcon, current: route().current('shop-visits.*'), show: hasModuleAccess('shop_visits'), category: 'Communication' },
 
         // Accounts
@@ -155,6 +159,8 @@ const navigation = computed(() => {
         { name: 'Inventory & Stock', href: route('reports.stock.summary'), icon: ChartPieIcon, current: route().current('reports.stock.*'), show: hasModuleAccess('reports_stock'), category: 'Reports' },
         { name: 'Daily Sales Register', href: route('reports.sales.daily-register'), icon: ClipboardDocumentCheckIcon, current: route().current('reports.sales.*'), show: hasModuleAccess('reports_sales'), category: 'Reports' },
         { name: 'Tax Compliance (GST)', href: route('reports.gst.gstr1'), icon: DocumentTextIcon, current: route().current('reports.gst.*'), show: hasModuleAccess('reports_gst'), category: 'Reports' },
+        { name: 'TDS Report', href: route('reports.compliance.tds'), icon: DocumentTextIcon, current: route().current('reports.compliance.tds'), show: hasModuleAccess('reports_gst'), category: 'Reports' },
+        { name: 'E-waybill Report', href: route('reports.compliance.ewaybill'), icon: TruckIcon, current: route().current('reports.compliance.ewaybill'), show: hasModuleAccess('reports_gst'), category: 'Reports' },
         { name: 'Vendor Outstanding', href: route('reports.finance.vendor-outstanding'), icon: WalletIcon, current: route().current('reports.finance.*'), show: hasModuleAccess('reports_finance'), category: 'Reports' },
         { name: 'MIS Dashboards', href: route('reports.bi.top-products'), icon: ChartBarSquareIcon, current: route().current('reports.bi.*'), show: hasModuleAccess('reports_bi'), category: 'Reports' },
     ];

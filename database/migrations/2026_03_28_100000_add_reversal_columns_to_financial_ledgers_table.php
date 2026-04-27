@@ -9,7 +9,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('financial_ledgers', function (Blueprint $table) {
-            $table->foreignId('reversed_by')->nullable()->after('reference')->constrained('users')->nullOnDelete();
+            $table->foreignId('reversed_by')->nullable()->after('narration')->constrained('users')->nullOnDelete();
             $table->timestamp('reversed_at')->nullable()->after('reversed_by');
             $table->string('reversal_reason', 500)->nullable()->after('reversed_at');
             $table->foreignId('reverses_financial_ledger_id')->nullable()->after('reversal_reason')->constrained('financial_ledgers')->nullOnDelete();

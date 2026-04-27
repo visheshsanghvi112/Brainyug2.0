@@ -26,7 +26,7 @@ class PurchaseReturnController extends Controller
 
     public function index(Request $request)
     {
-        $returns = PurchaseReturn::with(['supplier', 'purchaseInvoice', 'createdBy'])
+        $returns = PurchaseReturn::with(['supplier', 'purchaseInvoice', 'sourceInvoices:id,invoice_number', 'createdBy'])
             ->when($request->search, function ($q, $search) {
                 $q->where(function ($q2) use ($search) {
                     $q2->where('return_number', 'like', "%{$search}%")
@@ -61,6 +61,12 @@ class PurchaseReturnController extends Controller
                     'id' => $purchaseReturn->purchaseInvoice->id,
                     'invoice_number' => $purchaseReturn->purchaseInvoice->invoice_number,
                 ] : null,
+                'source_invoices' => $purchaseReturn->sourceInvoices
+                    ->map(fn ($invoice) => [
+                        'id' => $invoice->id,
+                        'invoice_number' => $invoice->invoice_number,
+                    ])
+                    ->values(),
             ])
             ->withQueryString();
 
@@ -148,6 +154,8 @@ class PurchaseReturnController extends Controller
         $validated = $request->validate([
             'supplier_id' => 'required|exists:suppliers,id',
             'purchase_invoice_id' => 'nullable|exists:purchase_invoices,id',
+            'source_invoice_ids' => 'nullable|array',
+            'source_invoice_ids.*' => 'integer|exists:purchase_invoices,id',
             'return_date' => 'required|date',
             'reason' => 'nullable|string',
             'items' => 'required|array|min:1',
@@ -160,32 +168,60 @@ class PurchaseReturnController extends Controller
             'items.*.reason' => 'nullable|string',
         ]);
 
-        $linkedInvoice = null;
+        $sourceInvoiceIds = collect($validated['source_invoice_ids'] ?? [])
+            ->filter()
+            ->map(fn ($value) => (int) $value)
+            ->values();
+
         if (!empty($validated['purchase_invoice_id'])) {
-            $linkedInvoice = PurchaseInvoice::with('items')->findOrFail($validated['purchase_invoice_id']);
-
-            if ($linkedInvoice->status !== 'approved') {
-                return back()->withErrors([
-                    'purchase_invoice_id' => 'Only approved purchase invoices can be used as the source for a purchase return.',
-                ])->withInput();
-            }
-
-            if ((int) $linkedInvoice->supplier_id !== (int) $validated['supplier_id']) {
-                return back()->withErrors([
-                    'purchase_invoice_id' => 'Selected invoice belongs to a different supplier. Please choose a matching invoice.',
-                ])->withInput();
-            }
-
-            $this->purchaseReturnLifecycleService->validateInvoiceLinkedReturnItems($linkedInvoice, $validated['items']);
+            $sourceInvoiceIds->push((int) $validated['purchase_invoice_id']);
         }
 
-        DB::transaction(function () use ($validated, $request, $linkedInvoice) {
+        $sourceInvoiceIds = $sourceInvoiceIds->unique()->values();
+
+        $sourceInvoices = collect();
+        if ($sourceInvoiceIds->isNotEmpty()) {
+            $sourceInvoices = PurchaseInvoice::with('items')
+                ->whereIn('id', $sourceInvoiceIds)
+                ->get();
+
+            if ($sourceInvoices->count() !== $sourceInvoiceIds->count()) {
+                return back()->withErrors([
+                    'source_invoice_ids' => 'One or more selected source invoices could not be loaded.',
+                ])->withInput();
+            }
+
+            if ($sourceInvoices->contains(fn ($invoice) => $invoice->status !== 'approved')) {
+                return back()->withErrors([
+                    'source_invoice_ids' => 'Only approved purchase invoices can be used as source invoices for a purchase return.',
+                ])->withInput();
+            }
+
+            if ($sourceInvoices->contains(fn ($invoice) => (int) $invoice->supplier_id !== (int) $validated['supplier_id'])) {
+                return back()->withErrors([
+                    'source_invoice_ids' => 'All selected source invoices must belong to the selected supplier.',
+                ])->withInput();
+            }
+
+            $taxTypes = $sourceInvoices->pluck('tax_type')->filter()->unique();
+            if ($taxTypes->count() > 1) {
+                return back()->withErrors([
+                    'source_invoice_ids' => 'Selected source invoices have mixed tax types. Please select invoices with the same tax type.',
+                ])->withInput();
+            }
+
+            $this->purchaseReturnLifecycleService->validateInvoicesLinkedReturnItems($sourceInvoices, $validated['items']);
+        }
+
+        DB::transaction(function () use ($validated, $request, $sourceInvoices, $sourceInvoiceIds) {
+            $financialYear = PurchaseInvoice::financialYearForDate($validated['return_date']);
+
             // Generate return number
-            $lastReturn = PurchaseReturn::where('financial_year', PurchaseInvoice::currentFinancialYear())
+            $lastReturn = PurchaseReturn::where('financial_year', $financialYear)
                 ->orderByDesc('id')
                 ->first();
             $nextNum = $lastReturn ? ((int) substr($lastReturn->return_number, -4)) + 1 : 1;
-            $returnNumber = 'PR-' . PurchaseInvoice::currentFinancialYear() . '-' . str_pad($nextNum, 4, '0', STR_PAD_LEFT);
+            $returnNumber = 'PR-' . $financialYear . '-' . str_pad($nextNum, 4, '0', STR_PAD_LEFT);
 
             $subtotal = 0;
             $totalSgst = 0;
@@ -196,12 +232,13 @@ class PurchaseReturnController extends Controller
             // We assume intra-state if no invoice linked, or we could fetch supplier state vs HO state.
             // For simplicity, if linked to invoice, use its tax type, else default intra.
             $taxType = 'intra_state';
-            if ($linkedInvoice) {
-                $taxType = $linkedInvoice->tax_type;
+            if ($sourceInvoices->isNotEmpty()) {
+                $taxType = (string) $sourceInvoices->first()->tax_type;
             }
 
-            $invoiceLineMap = $linkedInvoice
-                ? collect($linkedInvoice->items)->groupBy(fn($i) => $i->product_id . '|' . $i->batch_no)
+            $invoiceLineMap = $sourceInvoices->isNotEmpty()
+                ? $sourceInvoices->flatMap(fn ($invoice) => $invoice->items)
+                    ->groupBy(fn ($item) => $item->product_id . '|' . $item->batch_no)
                 : collect();
 
             foreach ($validated['items'] as $item) {
@@ -210,13 +247,13 @@ class PurchaseReturnController extends Controller
                 $gstPct = (float) $item['gst_percent'];
                 $expiryDate = $item['expiry_date'] ?? null;
 
-                if ($linkedInvoice) {
+                if ($sourceInvoices->isNotEmpty()) {
                     $key = $item['product_id'] . '|' . $item['batch_no'];
                     $invoiceLines = $invoiceLineMap->get($key);
 
                     if (!$invoiceLines || $invoiceLines->isEmpty()) {
                         throw ValidationException::withMessages([
-                            'items' => "Return item product {$item['product_id']} batch {$item['batch_no']} does not exist on linked invoice {$linkedInvoice->invoice_number}.",
+                            'items' => "Return item product {$item['product_id']} batch {$item['batch_no']} does not exist on selected source invoices.",
                         ]);
                     }
 
@@ -257,9 +294,11 @@ class PurchaseReturnController extends Controller
             $purchaseReturn = PurchaseReturn::create([
                 'return_number' => $returnNumber,
                 'supplier_id' => $validated['supplier_id'],
-                'purchase_invoice_id' => $validated['purchase_invoice_id'] ?? null,
+                'purchase_invoice_id' => $sourceInvoiceIds->isNotEmpty()
+                    ? (int) $sourceInvoiceIds->first()
+                    : ($validated['purchase_invoice_id'] ?? null),
                 'return_date' => $validated['return_date'],
-                'financial_year' => PurchaseInvoice::currentFinancialYear(),
+                'financial_year' => $financialYear,
                 'subtotal' => round($subtotal, 2),
                 'sgst_amount' => round($totalSgst, 2),
                 'cgst_amount' => round($totalCgst, 2),
@@ -273,6 +312,10 @@ class PurchaseReturnController extends Controller
             foreach ($itemsData as $item) {
                 $purchaseReturn->items()->create($item);
             }
+
+            if ($sourceInvoiceIds->isNotEmpty()) {
+                $purchaseReturn->sourceInvoices()->sync($sourceInvoiceIds->all());
+            }
         });
 
         return redirect()->route('admin.purchase-returns.index')
@@ -281,7 +324,7 @@ class PurchaseReturnController extends Controller
 
     public function show(PurchaseReturn $purchaseReturn)
     {
-        $purchaseReturn->load(['supplier', 'purchaseInvoice', 'items.product', 'createdBy', 'approvedBy', 'reversedBy']);
+        $purchaseReturn->load(['supplier', 'purchaseInvoice', 'sourceInvoices:id,invoice_number', 'items.product', 'createdBy', 'approvedBy', 'reversedBy']);
 
         return Inertia::render('Procurement/PurchaseReturns/Show', [
             'purchaseReturn' => $purchaseReturn,
@@ -340,7 +383,7 @@ class PurchaseReturnController extends Controller
      */
     public function export(Request $request)
     {
-        $query = PurchaseReturn::with(['supplier', 'purchaseInvoice', 'createdBy'])
+        $query = PurchaseReturn::with(['supplier', 'purchaseInvoice', 'sourceInvoices:id,invoice_number', 'createdBy'])
             ->when($request->search, function ($q, $search) {
                 $q->where(function ($q2) use ($search) {
                     $q2->where('return_number', 'like', "%{$search}%")
@@ -368,14 +411,14 @@ class PurchaseReturnController extends Controller
         $rows = $returns->map(fn (PurchaseReturn $return) => [
             $return->return_number,
             optional($return->return_date)?->format('Y-m-d'),
-            $return->supplier->name ?? '',
-            $return->purchaseInvoice?->invoice_number,
+            $return->supplier?->name ?? '',
+            $return->sourceInvoices->pluck('invoice_number')->join(', ') ?: $return->purchaseInvoice?->invoice_number,
             ucfirst($return->workflow_status),
             round((float) $return->total_amount, 2),
             round((float) $return->cgst_amount, 2),
             round((float) $return->sgst_amount, 2),
             round((float) $return->igst_amount, 2),
-            $return->createdBy->name ?? '',
+            $return->createdBy?->name ?? '',
         ])->all();
 
         $summary = [

@@ -71,4 +71,12 @@ class PurchaseInvoice extends Model
         $year = $now->month >= 4 ? $now->year : $now->year - 1;
         return $year . '-' . substr($year + 1, -2);
     }
+
+    public static function financialYearForDate(string $date): string
+    {
+        $value = \Carbon\Carbon::parse($date);
+        $year = $value->month >= 4 ? $value->year : $value->year - 1;
+
+        return $year . '-' . substr($year + 1, -2);
+    }
 }

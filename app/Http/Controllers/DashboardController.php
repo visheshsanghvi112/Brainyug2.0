@@ -10,6 +10,7 @@ use App\Models\PurchaseInvoice;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\SalesInvoice;
+use App\Models\StockAlert;
 use App\Models\FinancialLedger;
 use App\Models\Expense;
 use App\Support\DashboardAccessPolicy;
@@ -113,6 +114,21 @@ class DashboardController extends Controller
         $pendingFranchisees = (clone $franchisees)->pending()->count();
         $openOrders = (clone $orders)->whereIn('status', ['pending', 'accepted', 'allocated'])->count();
         $riskOrders = (clone $orders)->where('status', 'pending')->where('created_at', '<=', now()->subDays(2))->count();
+        $stockAlertQuery = StockAlert::query()->unacknowledged();
+
+        if (is_array($scopedFranchiseeIds) && !$user->isSuperAdmin()) {
+            if ($scopedFranchiseeIds === []) {
+                $stockAlertQuery->whereRaw('1 = 0');
+            } else {
+                $stockAlertQuery->where(function (Builder $query) use ($scopedFranchiseeIds) {
+                    $query->whereIn('franchisee_id', $scopedFranchiseeIds)
+                        ->orWhereNull('franchisee_id');
+                });
+            }
+        }
+
+        $pendingStockAlerts = (clone $stockAlertQuery)->count();
+        $criticalStockAlerts = (clone $stockAlertQuery)->where('alert_level', 'critical')->count();
 
         return [
             'title' => $user->isAdmin() ? ($user->isSuperAdmin() ? 'Executive Dashboard' : 'Admin Dashboard') : 'Territory Dashboard',
@@ -125,17 +141,21 @@ class DashboardController extends Controller
                 $pendingFranchisees > 0 ? $this->alert('high', 'Pending franchise approvals', $pendingFranchisees . ' registrations are waiting for decision.', route('admin.franchise-registrations.index')) : null,
                 $riskOrders > 0 ? $this->alert('medium', 'Aging pending orders', $riskOrders . ' orders are pending for more than 48 hours.', route('admin.dist-orders.index', ['status' => 'pending'])) : null,
                 $openOrders > 20 ? $this->alert('medium', 'Dispatch queue saturation', 'Open distribution queue has crossed 20 active orders.', route('admin.dist-orders.index')) : null,
+                $pendingStockAlerts > 0 ? $this->alert('medium', 'Pending stock alerts', $pendingStockAlerts . ' stock alerts need acknowledgement.', route('admin.stock-alerts.index')) : null,
+                $criticalStockAlerts > 0 ? $this->alert('high', 'Critical stock alerts', $criticalStockAlerts . ' alerts are marked critical and need immediate action.', route('admin.stock-alerts.index', ['alert_level' => 'critical', 'status' => 'pending'])) : null,
             ])),
             'focus' => [
                 ['label' => 'Network Coverage', 'value' => $activeFranchisees . ' active stores in scope'],
                 ['label' => 'Approval SLA', 'value' => ($pendingFranchisees > 0 ? $pendingFranchisees : 'No') . ' items in approval queue'],
                 ['label' => 'Order Throughput', 'value' => $openOrders . ' active orders in process'],
+                ['label' => 'Stock Alert Queue', 'value' => $pendingStockAlerts . ' pending alerts (' . $criticalStockAlerts . ' critical)'],
             ],
             'actions' => [
                 $this->action('Franchise Network', 'Review registrations, approvals, and active stores.', route('admin.franchisees.index'), 'emerald'),
                 $this->action('Distribution Orders', 'Run review, allocation, and dispatch operations.', route('admin.dist-orders.index'), 'sky'),
                 $this->action('Product Catalog', 'Control products, companies, salts, and tax masters.', route('admin.products.index'), 'indigo'),
                 $this->action('Procurement Desk', 'Monitor suppliers and purchase documents.', route('admin.purchase-invoices.index'), 'violet'),
+                $this->action('Stock Alerts', 'Acknowledge, resolve, and monitor stock risk by location.', route('admin.stock-alerts.index'), 'amber'),
             ],
             'workflows' => [
                 $this->workflow('Identity & hierarchy', 'Users, heads, and franchise network governance.', 'live', route('admin.franchisees.index')),

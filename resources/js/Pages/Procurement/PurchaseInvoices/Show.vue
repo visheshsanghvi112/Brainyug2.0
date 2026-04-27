@@ -14,6 +14,8 @@ const props = defineProps({
     invoice: Object,
     actions: Object,
     returnSummary: Object,
+    paymentSummary: Object,
+    paymentAllocations: Array,
     linkedReturns: Array,
 });
 
@@ -256,6 +258,66 @@ function linkedReturnStatusClass(status) {
                             </div>
                         </div>
                     </div>
+
+                        <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-gray-800">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Settlement Position</h3>
+                                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Invoice payable after returns, payment allocation, and overdue state.</p>
+                                </div>
+                                <span
+                                    class="rounded-full px-3 py-1 text-xs font-semibold"
+                                    :class="paymentSummary?.is_overdue ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-200' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-200'"
+                                >
+                                    {{ paymentSummary?.is_overdue ? 'OVERDUE' : 'ON TRACK' }}
+                                </span>
+                            </div>
+
+                            <div class="mt-4 grid gap-3">
+                                <div class="rounded-xl bg-slate-50 p-4 dark:bg-slate-900/40">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">Net Payable</div>
+                                    <div class="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">₹{{ paymentSummary?.net_payable ?? 0 }}</div>
+                                </div>
+                                <div class="rounded-xl bg-emerald-50 p-4 dark:bg-emerald-900/20">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Allocated Payments</div>
+                                    <div class="mt-1 text-2xl font-bold text-emerald-800 dark:text-emerald-200">₹{{ paymentSummary?.paid_amount ?? 0 }}</div>
+                                </div>
+                                <div class="rounded-xl bg-amber-50 p-4 dark:bg-amber-900/20">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Outstanding</div>
+                                    <div class="mt-1 text-2xl font-bold text-amber-800 dark:text-amber-200">₹{{ paymentSummary?.outstanding_amount ?? 0 }}</div>
+                                    <div class="text-xs text-amber-700/80 dark:text-amber-300/80">
+                                        Due: {{ paymentSummary?.due_date || 'N/A' }} · Allocation records: {{ paymentSummary?.allocation_count || 0 }}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-gray-800">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Payment Allocation Trail</h3>
+                                <span v-if="!(paymentAllocations || []).length" class="text-xs text-slate-400">No allocations yet</span>
+                            </div>
+
+                            <div v-if="(paymentAllocations || []).length" class="mt-4 space-y-3">
+                                <div
+                                    v-for="allocation in paymentAllocations"
+                                    :key="allocation.id"
+                                    class="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"
+                                >
+                                    <div class="flex items-start justify-between gap-4">
+                                        <div>
+                                            <div class="font-semibold text-slate-900 dark:text-slate-100">{{ allocation.voucher_no || 'No Voucher' }}</div>
+                                            <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                                {{ allocation.allocation_date || allocation.transaction_date || 'Date N/A' }}
+                                                <span v-if="allocation.payment_mode">· {{ allocation.payment_mode }}</span>
+                                            </div>
+                                            <div v-if="allocation.narration" class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ allocation.narration }}</div>
+                                        </div>
+                                        <div class="text-right text-sm font-semibold text-slate-900 dark:text-slate-100">₹{{ allocation.amount }}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                 </div>
             </div>
         </div>

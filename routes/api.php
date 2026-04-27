@@ -11,7 +11,8 @@ use App\Http\Controllers\Api\OperationalController;
 // Mobile API Authentication — throttle brute-force attempts (5 attempts/min per IP)
 Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
 
-Route::middleware('auth:sanctum')->group(function () {
+// Authenticated API endpoints — throttle to 60 requests/minute per user to prevent abuse
+Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     // Current User Profile
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);

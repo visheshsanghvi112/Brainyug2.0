@@ -141,9 +141,10 @@ function statusClass(status) {
                         <div class="text-lg font-medium text-gray-900 dark:text-white">{{ purchaseReturn.return_date }}</div>
                     </div>
                     <div>
-                        <div class="text-xs uppercase text-gray-500">Linked Invoice</div>
+                        <div class="text-xs uppercase text-gray-500">Linked Source Invoices</div>
                         <div class="text-sm font-medium text-gray-900 dark:text-white">
-                            {{ purchaseReturn.purchaseInvoice?.invoice_number || 'Manual Return' }}
+                            <span v-if="purchaseReturn.sourceInvoices?.length">{{ purchaseReturn.sourceInvoices.map((invoice) => invoice.invoice_number).join(', ') }}</span>
+                            <span v-else>{{ purchaseReturn.purchaseInvoice?.invoice_number || 'Manual Return' }}</span>
                         </div>
                     </div>
                 </div>

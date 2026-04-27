@@ -145,8 +145,11 @@ const statusColors = {
                                     <td class="whitespace-nowrap px-6 py-4">
                                         <div class="font-medium text-gray-900 dark:text-white">{{ purchaseReturn.supplier?.name || '-' }}</div>
                                         <div class="text-xs text-blue-500 hover:underline">
-                                            <Link v-if="purchaseReturn.purchase_invoice_id" :href="route('admin.purchase-invoices.show', purchaseReturn.purchase_invoice_id)">
-                                                Inv: {{ purchaseReturn.purchase_invoice?.invoice_number }}
+                                            <Link v-if="purchaseReturn.source_invoices?.length" :href="route('admin.purchase-returns.show', purchaseReturn.id)">
+                                                Invoices: {{ purchaseReturn.source_invoices.map((invoice) => invoice.invoice_number).join(', ') }}
+                                            </Link>
+                                            <Link v-else-if="purchaseReturn.purchase_invoice_id" :href="route('admin.purchase-invoices.show', purchaseReturn.purchase_invoice_id)">
+                                                Invoice: {{ purchaseReturn.purchase_invoice?.invoice_number }}
                                             </Link>
                                         </div>
                                     </td>

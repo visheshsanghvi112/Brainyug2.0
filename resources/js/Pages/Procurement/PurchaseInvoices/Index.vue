@@ -1,7 +1,7 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import Pagination from '@/Components/Pagination.vue';
-import { Head, Link, router } from '@inertiajs/vue3';
+import { Head, Link, router, useForm } from '@inertiajs/vue3';
 import { ref, watch } from 'vue';
 import {
     MagnifyingGlassIcon, PlusIcon, DocumentTextIcon, CheckCircleIcon,
@@ -19,6 +19,7 @@ const props = defineProps({
 const search = ref(props.filters?.search || '');
 const statusFilter = ref(props.filters?.status || '');
 const supplierFilter = ref(props.filters?.supplier_id || '');
+const importForm = useForm({ file: null });
 
 function applyFilters() {
     router.get(route('admin.purchase-invoices.index'), {
@@ -59,6 +60,24 @@ function formatCurrency(amount) {
         minimumFractionDigits: 2,
     }).format(Number(amount || 0));
 }
+
+function onCsvSelected(event) {
+    importForm.file = event.target.files?.[0] || null;
+}
+
+function submitCsvImport() {
+    if (!importForm.file) {
+        return;
+    }
+
+    importForm.post(route('admin.purchase-invoices.import.store'), {
+        forceFormData: true,
+        preserveScroll: true,
+        onSuccess: () => {
+            importForm.reset();
+        },
+    });
+}
 </script>
 
 <template>
@@ -73,6 +92,22 @@ function formatCurrency(amount) {
                     </h2>
                 </div>
                 <div class="flex items-center gap-3">
+                    <a :href="route('admin.purchase-invoices.import.template')"
+                        class="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-amber-400 transition-all duration-200">
+                        <ArrowDownTrayIcon class="h-4 w-4" /> Template
+                    </a>
+                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-amber-500 transition-all duration-200">
+                        Import CSV
+                        <input type="file" accept=".csv,text/csv" class="hidden" @change="onCsvSelected" />
+                    </label>
+                    <button
+                        type="button"
+                        class="inline-flex items-center gap-2 rounded-lg bg-amber-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-amber-600 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        :disabled="!importForm.file || importForm.processing"
+                        @click="submitCsvImport"
+                    >
+                        Upload CSV
+                    </button>
                     <a :href="route('admin.purchase-invoices.export', { search, status: statusFilter, supplier_id: supplierFilter, format: 'csv' })"
                         class="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500 transition-all duration-200">
                         <ArrowDownTrayIcon class="h-4 w-4" /> CSV
@@ -94,6 +129,12 @@ function formatCurrency(amount) {
                     </Link>
                 </div>
             </div>
+
+            <div class="mt-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-800 dark:border-indigo-800/60 dark:bg-indigo-900/20 dark:text-indigo-200">
+                Stock and supplier ledger are impacted only when invoice status becomes Approved.
+            </div>
+
+            <p v-if="importForm.errors.file" class="text-sm font-semibold text-red-600">{{ importForm.errors.file }}</p>
         </template>
 
         <div class="py-6">

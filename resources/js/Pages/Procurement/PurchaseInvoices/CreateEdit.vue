@@ -142,6 +142,10 @@ function submit() {
             <div class="mx-auto max-w-screen-xl px-4 sm:px-6 lg:px-8">
                 <form @submit.prevent="submit" class="space-y-5" autocomplete="off">
 
+                    <div class="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800 dark:border-indigo-800/60 dark:bg-indigo-900/20 dark:text-indigo-200">
+                        Draft invoices are operationally safe: stock and supplier ledger are posted only after approval.
+                    </div>
+
                     <!-- ── SECTION 1: Invoice Header ─────────────────────── -->
                     <div class="rounded-2xl bg-white dark:bg-gray-800 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700 overflow-hidden">
                         <div class="flex items-center gap-2 px-6 py-4 border-b border-gray-100 dark:border-gray-700">

@@ -311,8 +311,8 @@ class SalesInvoiceController extends Controller
                 fputcsv($file, [
                     $invoice->bill_no,
                     $invoice->date_time->format('Y-m-d H:i'),
-                    $invoice->customer->name ?? 'Walk-in',
-                    $invoice->user->name ?? 'System',
+                    $invoice->customer?->name ?? 'Walk-in',
+                    $invoice->user?->name ?? 'System',
                     ucfirst($invoice->status),
                     $invoice->total_amount,
                     $invoice->total_discount_amount,

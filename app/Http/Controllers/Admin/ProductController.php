@@ -363,85 +363,6 @@ class ProductController extends Controller
         return response()->download($temp, $filename, [
             'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ])->deleteFileAfterSend(true);
-
-        $spreadsheet = new Spreadsheet();
-        $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle('Product Catalog');
-
-        // Header columns matching legacy layout
-        $headers = ['SR', 'PRODUCT NAME', 'CONTENT / SALT', 'COMPANY', 'CATEGORY', 'HSN CODE', 'PACKING', 'BOX SIZE', 'UNIT', 'SECONDARY', 'CONVERSION', 'MRP', 'PTR', 'PTS', 'RATE A (GST)', 'CSR', 'STATUS'];
-
-        // Style the header row
-        $headerStyle = [
-            'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF'], 'size' => 11],
-            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => '1F4E79']],
-            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
-            'borders' => ['allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['rgb' => 'CCCCCC']]],
-        ];
-
-        foreach ($headers as $colIdx => $header) {
-            $sheet->setCellValue([$colIdx + 1, 1], $header);
-        }
-        $sheet->getStyle('A1:Q1')->applyFromArray($headerStyle);
-        $sheet->getRowDimension(1)->setRowHeight(28);
-
-        // Data rows
-        $row = 2;
-        foreach ($products as $idx => $product) {
-            $sheet->setCellValue([1,  $row], $idx + 1);
-            $sheet->setCellValue([2,  $row], $product->product_name);
-            $sheet->setCellValue([3,  $row], $product->salt?->name ?? '—');
-            $sheet->setCellValue([4,  $row], $product->company?->name ?? '—');
-            $sheet->setCellValue([5,  $row], $product->category?->name ?? '—');
-            $sheet->setCellValue([6,  $row], $product->hsn?->hsn_code ?? '—');
-            $sheet->setCellValue([7,  $row], $product->packing_desc ?? '—');
-            $sheet->setCellValue([8,  $row], $product->boxSize?->size_name ?? '—');
-            $sheet->setCellValue([9,  $row], $product->unit ?? '—');
-            $sheet->setCellValue([10, $row], $product->secondary_unit ?? '—');
-            $sheet->setCellValue([11, $row], $product->conversion_factor);
-            $sheet->setCellValue([12, $row], (float) $product->mrp);
-            $sheet->setCellValue([13, $row], (float) $product->ptr);
-            $sheet->setCellValue([14, $row], (float) $product->pts);
-            $sheet->setCellValue([15, $row], (float) ($product->rate_a ?? 0));
-            $sheet->setCellValue([16, $row], (float) ($product->csr ?? 0));
-            $sheet->setCellValue([17, $row], $product->is_active ? 'Active' : 'Inactive');
-
-            // Alternating row color
-            if ($idx % 2 === 1) {
-                $sheet->getStyle("A{$row}:Q{$row}")->getFill()
-                    ->setFillType(Fill::FILL_SOLID)
-                    ->getStartColor()->setRGB('F2F7FB');
-            }
-            $row++;
-        }
-
-        // Borders for data area
-        $lastRow = $row - 1;
-        if ($lastRow >= 2) {
-            $sheet->getStyle("A2:Q{$lastRow}")->getBorders()->getAllBorders()
-                ->setBorderStyle(Border::BORDER_THIN)->getColor()->setRGB('DDDDDD');
-        }
-
-        // Number format for price columns (L, M, N, O, P)
-        if ($lastRow >= 2) {
-            foreach (['L', 'M', 'N', 'O', 'P'] as $col) {
-                $sheet->getStyle("{$col}2:{$col}{$lastRow}")->getNumberFormat()->setFormatCode('#,##0.00');
-            }
-        }
-
-        // Auto-size columns
-        foreach (range('A', 'Q') as $col) {
-            $sheet->getColumnDimension($col)->setAutoSize(true);
-        }
-
-        $filename = 'ProductCatalog_' . now()->format('Y-m-d') . '.xlsx';
-        $temp = tempnam(sys_get_temp_dir(), 'export');
-        $writer = new Xlsx($spreadsheet);
-        $writer->save($temp);
-
-        return response()->download($temp, $filename, [
-            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        ])->deleteFileAfterSend(true);
     }
 
     /**
@@ -470,13 +391,6 @@ class ProductController extends Controller
         $pdf = Pdf::loadView('exports.products-pdf', $viewData)->setPaper('a4', 'landscape');
 
         return $pdf->download('ProductCatalog_' . now()->format('Y-m-d_His') . '.pdf');
-
-        return response()->view('exports.products-pdf', [
-            'products' => $products,
-            'generatedAt' => now()->format('d M Y, h:i A'),
-            'totalCount' => $products->count(),
-            'autoPrint' => true,
-        ]);
     }
 
     private function productExportOptions(Request $request): array

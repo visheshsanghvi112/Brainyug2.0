@@ -7,10 +7,12 @@ use App\Models\DistOrder;
 use App\Models\HsnMaster;
 use App\Models\Product;
 use App\Models\PurchaseInvoice;
+use App\Models\SupplierPaymentAllocation;
 use App\Models\Supplier;
 use App\Services\PurchaseInvoiceDraftService;
 use App\Services\PurchaseInvoiceLifecycleService;
 use App\Services\ReportExportService;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
@@ -76,9 +78,9 @@ class PurchaseInvoiceController extends Controller
     public function store(Request $request)
     {
         $validated = $this->validatedInvoicePayload($request);
+        $financialYear = PurchaseInvoice::financialYearForDate($validated['invoice_date']);
 
         if (!empty($validated['supplier_invoice_no'])) {
-            $financialYear = PurchaseInvoice::currentFinancialYear();
             $duplicate = PurchaseInvoice::where('supplier_id', $validated['supplier_id'])
                 ->where('supplier_invoice_no', $validated['supplier_invoice_no'])
                 ->where('financial_year', $financialYear)
@@ -98,6 +100,262 @@ class PurchaseInvoiceController extends Controller
             ->with('success', 'Purchase invoice created as draft.');
     }
 
+    /**
+     * Legacy parity helper: bulk import draft purchase invoices from CSV.
+     *
+     * Expected header columns (case-insensitive):
+     * supplier_code,supplier_invoice_no,invoice_date,tax_type,product_sku,batch_no,qty,mrp,rate,gst_percent
+     * Optional: received_date,due_days,transporter,lr_number,notes,free_qty,unit,discount_percent,expiry_date,mfg_date,hsn_code
+     */
+    public function importCsv(Request $request)
+    {
+        $request->validate([
+            'file' => 'required|file|mimes:csv,txt|max:5120',
+        ]);
+
+        $file = $request->file('file');
+        $handle = fopen($file->getRealPath(), 'r');
+
+        if ($handle === false) {
+            return back()->withErrors([
+                'file' => 'Unable to read uploaded CSV file.',
+            ]);
+        }
+
+        $headers = fgetcsv($handle);
+        if (!$headers || count($headers) === 0) {
+            fclose($handle);
+            return back()->withErrors([
+                'file' => 'CSV file is empty or missing header row.',
+            ]);
+        }
+
+        $normalizedHeaders = array_map(function ($value) {
+            return strtolower(trim((string) $value));
+        }, $headers);
+
+        $required = ['supplier_code', 'supplier_invoice_no', 'invoice_date', 'tax_type', 'product_sku', 'batch_no', 'qty', 'mrp', 'rate', 'gst_percent'];
+        $missing = array_values(array_diff($required, $normalizedHeaders));
+
+        if (!empty($missing)) {
+            fclose($handle);
+            return back()->withErrors([
+                'file' => 'CSV header missing required columns: ' . implode(', ', $missing),
+            ]);
+        }
+
+        $supplierMap = Supplier::query()->get(['id', 'code'])->keyBy(fn ($supplier) => strtoupper((string) $supplier->code));
+        $productMap = Product::query()->where('is_active', true)->get(['id', 'sku', 'hsn_id'])->keyBy(fn ($product) => strtoupper((string) $product->sku));
+        $hsnMap = HsnMaster::query()->get(['id', 'hsn_code'])->keyBy(fn ($hsn) => strtoupper((string) $hsn->hsn_code));
+
+        $groups = [];
+        $line = 1;
+        $errors = [];
+
+        while (($row = fgetcsv($handle)) !== false) {
+            $line++;
+
+            if ($row === [null] || count(array_filter($row, fn ($v) => trim((string) $v) !== '')) === 0) {
+                continue;
+            }
+
+            $payload = [];
+            foreach ($normalizedHeaders as $index => $header) {
+                $payload[$header] = isset($row[$index]) ? trim((string) $row[$index]) : null;
+            }
+
+            $supplierCode = strtoupper((string) ($payload['supplier_code'] ?? ''));
+            $supplier = $supplierMap->get($supplierCode);
+            if (!$supplier) {
+                $errors[] = "Row {$line}: unknown supplier_code '{$payload['supplier_code']}'.";
+                continue;
+            }
+
+            $sku = strtoupper((string) ($payload['product_sku'] ?? ''));
+            $product = $productMap->get($sku);
+            if (!$product) {
+                $errors[] = "Row {$line}: unknown product_sku '{$payload['product_sku']}'.";
+                continue;
+            }
+
+            $taxType = (string) ($payload['tax_type'] ?? '');
+            if (!in_array($taxType, ['intra_state', 'inter_state'], true)) {
+                $errors[] = "Row {$line}: tax_type must be intra_state or inter_state.";
+                continue;
+            }
+
+            $invoiceDate = (string) ($payload['invoice_date'] ?? '');
+            if ($invoiceDate === '') {
+                $errors[] = "Row {$line}: invoice_date is required.";
+                continue;
+            }
+
+            $groupKey = implode('|', [
+                $supplier->id,
+                (string) ($payload['supplier_invoice_no'] ?? ''),
+                $invoiceDate,
+                $taxType,
+            ]);
+
+            $hsnId = null;
+            if (!empty($payload['hsn_code'])) {
+                $hsn = $hsnMap->get(strtoupper((string) $payload['hsn_code']));
+                if (!$hsn) {
+                    $errors[] = "Row {$line}: unknown hsn_code '{$payload['hsn_code']}'.";
+                    continue;
+                }
+                $hsnId = $hsn->id;
+            }
+
+            if (!isset($groups[$groupKey])) {
+                $groups[$groupKey] = [
+                    'supplier_id' => $supplier->id,
+                    'supplier_invoice_no' => $payload['supplier_invoice_no'] ?: null,
+                    'invoice_date' => $invoiceDate,
+                    'received_date' => $payload['received_date'] ?: null,
+                    'due_days' => is_numeric($payload['due_days'] ?? null) ? (int) $payload['due_days'] : 0,
+                    'transporter' => $payload['transporter'] ?: null,
+                    'lr_number' => $payload['lr_number'] ?: null,
+                    'tax_type' => $taxType,
+                    'notes' => $payload['notes'] ?: null,
+                    'items' => [],
+                ];
+            }
+
+            $groups[$groupKey]['items'][] = [
+                'product_id' => $product->id,
+                'batch_no' => (string) ($payload['batch_no'] ?? ''),
+                'expiry_date' => $payload['expiry_date'] ?: null,
+                'mfg_date' => $payload['mfg_date'] ?: null,
+                'qty' => (float) ($payload['qty'] ?? 0),
+                'free_qty' => (float) ($payload['free_qty'] ?? 0),
+                'unit' => $payload['unit'] ?: null,
+                'mrp' => (float) ($payload['mrp'] ?? 0),
+                'rate' => (float) ($payload['rate'] ?? 0),
+                'discount_percent' => (float) ($payload['discount_percent'] ?? 0),
+                'gst_percent' => (float) ($payload['gst_percent'] ?? 0),
+                'hsn_id' => $hsnId ?: $product->hsn_id,
+            ];
+        }
+
+        fclose($handle);
+
+        if (!empty($errors)) {
+            return back()->withErrors([
+                'file' => implode(' ', array_slice($errors, 0, 10)),
+            ]);
+        }
+
+        if (empty($groups)) {
+            return back()->withErrors([
+                'file' => 'No valid rows found in CSV.',
+            ]);
+        }
+
+        $created = 0;
+        $duplicatesSkipped = 0;
+
+        DB::transaction(function () use (&$created, &$duplicatesSkipped, $groups, $request) {
+            foreach ($groups as $payload) {
+                $fy = PurchaseInvoice::financialYearForDate($payload['invoice_date']);
+
+                if (!empty($payload['supplier_invoice_no'])) {
+                    $duplicate = PurchaseInvoice::query()
+                        ->where('supplier_id', $payload['supplier_id'])
+                        ->where('supplier_invoice_no', $payload['supplier_invoice_no'])
+                        ->where('financial_year', $fy)
+                        ->whereNot('status', 'cancelled')
+                        ->exists();
+
+                    if ($duplicate) {
+                        $duplicatesSkipped++;
+                        continue;
+                    }
+                }
+
+                $this->purchaseInvoiceDraftService->create($payload, $request->user()->id);
+                $created++;
+            }
+        });
+
+        $statusKey = $created > 0 ? 'success' : 'error';
+        $message = $created > 0
+            ? "CSV imported successfully. {$created} draft invoice(s) created."
+            : 'CSV processed, but no new invoices were created.';
+
+        if ($duplicatesSkipped > 0) {
+            $message .= " {$duplicatesSkipped} duplicate invoice group(s) skipped.";
+        }
+
+        return redirect()->route('admin.purchase-invoices.index')->with($statusKey, $message);
+    }
+
+    public function importTemplate()
+    {
+        $headers = [
+            'supplier_code',
+            'supplier_invoice_no',
+            'invoice_date',
+            'tax_type',
+            'product_sku',
+            'batch_no',
+            'qty',
+            'mrp',
+            'rate',
+            'gst_percent',
+            'received_date',
+            'due_days',
+            'transporter',
+            'lr_number',
+            'notes',
+            'free_qty',
+            'unit',
+            'discount_percent',
+            'expiry_date',
+            'mfg_date',
+            'hsn_code',
+        ];
+
+        $sampleRows = [
+            [
+                'SUP001',
+                'INV-2026-001',
+                now()->toDateString(),
+                'intra_state',
+                'SKU-001',
+                'BATCH-2401',
+                '100',
+                '12.50',
+                '10.00',
+                '12',
+                now()->toDateString(),
+                '30',
+                'Self',
+                'LR-001',
+                'Initial stock intake',
+                '5',
+                'BOX',
+                '0',
+                now()->addMonths(18)->toDateString(),
+                now()->subMonths(2)->toDateString(),
+                '30049099',
+            ],
+        ];
+
+        return response()->streamDownload(function () use ($headers, $sampleRows) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $headers);
+
+            foreach ($sampleRows as $row) {
+                fputcsv($file, $row);
+            }
+
+            fclose($file);
+        }, 'purchase_invoice_import_template.csv', [
+            'Content-Type' => 'text/csv',
+        ]);
+    }
+
     public function show(PurchaseInvoice $purchaseInvoice)
     {
         $purchaseInvoice->load([
@@ -114,9 +372,43 @@ class PurchaseInvoiceController extends Controller
         $returnSummary = $this->buildReturnSummary($purchaseInvoice);
         $hasActiveReturns = ($returnSummary['draft_return_count'] + $returnSummary['approved_return_count']) > 0;
 
+        $paymentAllocations = SupplierPaymentAllocation::query()
+            ->with(['financialLedger:id,voucher_no,transaction_date,transaction_type,payment_mode,narration'])
+            ->where('purchase_invoice_id', $purchaseInvoice->id)
+            ->orderByDesc('id')
+            ->get();
+
+        $paidAmount = round((float) $paymentAllocations->sum('amount'), 2);
+        $netPayable = round(max(0, (float) $purchaseInvoice->total_amount - (float) ($returnSummary['approved_return_total'] ?? 0)), 2);
+        $outstanding = round(max(0, $netPayable - $paidAmount), 2);
+        $dueDate = $purchaseInvoice->invoice_date
+            ? $purchaseInvoice->invoice_date->copy()->addDays((int) ($purchaseInvoice->due_days ?? 0))
+            : null;
+        $isOverdue = $dueDate !== null && $outstanding > 0 && $dueDate->lt(now()->startOfDay());
+
         return Inertia::render('Procurement/PurchaseInvoices/Show', [
             'invoice' => $purchaseInvoice,
             'returnSummary' => $returnSummary,
+            'paymentSummary' => [
+                'net_payable' => $netPayable,
+                'paid_amount' => $paidAmount,
+                'outstanding_amount' => $outstanding,
+                'is_overdue' => $isOverdue,
+                'due_date' => optional($dueDate)?->format('Y-m-d'),
+                'allocation_count' => $paymentAllocations->count(),
+            ],
+            'paymentAllocations' => $paymentAllocations->map(function ($allocation) {
+                return [
+                    'id' => $allocation->id,
+                    'amount' => round((float) $allocation->amount, 2),
+                    'allocation_date' => optional($allocation->allocation_date)?->format('Y-m-d'),
+                    'voucher_no' => $allocation->financialLedger?->voucher_no,
+                    'transaction_date' => optional($allocation->financialLedger?->transaction_date)?->format('Y-m-d'),
+                    'transaction_type' => $allocation->financialLedger?->transaction_type,
+                    'payment_mode' => $allocation->financialLedger?->payment_mode,
+                    'narration' => $allocation->financialLedger?->narration,
+                ];
+            })->values(),
             'linkedReturns' => $purchaseInvoice->purchaseReturns
                 ->sortByDesc(fn ($purchaseReturn) => sprintf(
                     '%02d|%s|%010d',
@@ -268,14 +560,14 @@ class PurchaseInvoiceController extends Controller
             $invoice->invoice_number,
             $invoice->supplier_invoice_no,
             optional($invoice->invoice_date)?->format('Y-m-d'),
-            $invoice->supplier->name ?? '',
+            $invoice->supplier?->name ?? '',
             ucfirst($invoice->status),
             round((float) $invoice->total_amount, 2),
             strtoupper((string) $invoice->tax_type),
             round((float) $invoice->cgst_amount, 2),
             round((float) $invoice->sgst_amount, 2),
             round((float) $invoice->igst_amount, 2),
-            $invoice->createdBy->name ?? '',
+            $invoice->createdBy?->name ?? '',
         ])->all();
 
         $summary = [
