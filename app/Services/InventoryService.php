@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\InventoryLedger;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Carbon;
 
 /**
  * InventoryService — THE source of truth for all stock operations.
@@ -30,6 +31,8 @@ class InventoryService
      */
     public function getStock(int $productId, string $batchNo, string $locationType, int $locationId): float
     {
+        $batchNo = InventoryLedger::normalizeBatchNo($batchNo);
+
         $result = InventoryLedger::where('product_id', $productId)
             ->where('batch_no', $batchNo)
             ->where('location_type', $locationType)
@@ -120,7 +123,7 @@ class InventoryService
      */
     public function recordPurchase(array $data): InventoryLedger
     {
-        return InventoryLedger::create([
+        return $this->createLedgerEntry([
             'product_id' => $data['product_id'],
             'batch_no' => $data['batch_no'],
             'expiry_date' => $data['expiry_date'] ?? null,
@@ -151,7 +154,7 @@ class InventoryService
             locationType: 'franchisee',
             locationId: (int) $data['franchisee_id'],
             requiredQty: (float) $data['qty'],
-            onSuccess: fn () => InventoryLedger::create([
+            onSuccess: fn () => $this->createLedgerEntry([
                 'product_id' => $data['product_id'],
                 'batch_no' => $data['batch_no'],
                 'expiry_date' => $data['expiry_date'] ?? null,
@@ -187,7 +190,7 @@ class InventoryService
             locationId: 0,
             requiredQty: (float) $data['qty'],
             onSuccess: function () use ($data) {
-                $out = InventoryLedger::create([
+                $out = $this->createLedgerEntry([
                     'product_id' => $data['product_id'],
                     'batch_no' => $data['batch_no'],
                     'expiry_date' => $data['expiry_date'] ?? null,
@@ -204,7 +207,7 @@ class InventoryService
                     'created_by' => $data['created_by'] ?? auth()->id(),
                 ]);
 
-                $in = InventoryLedger::create([
+                $in = $this->createLedgerEntry([
                     'product_id' => $data['product_id'],
                     'batch_no' => $data['batch_no'],
                     'expiry_date' => $data['expiry_date'] ?? null,
@@ -232,7 +235,7 @@ class InventoryService
      */
     public function recordSaleReturn(array $data): InventoryLedger
     {
-        return InventoryLedger::create([
+        return $this->createLedgerEntry([
             'product_id' => $data['product_id'],
             'batch_no' => $data['batch_no'],
             'expiry_date' => $data['expiry_date'] ?? null,
@@ -260,7 +263,7 @@ class InventoryService
             locationType: 'warehouse',
             locationId: 0,
             requiredQty: (float) $data['qty'],
-            onSuccess: fn () => InventoryLedger::create([
+            onSuccess: fn () => $this->createLedgerEntry([
                 'product_id' => $data['product_id'],
                 'batch_no' => $data['batch_no'],
                 'expiry_date' => $data['expiry_date'] ?? null,
@@ -286,7 +289,7 @@ class InventoryService
      */
     public function recordPurchaseReturnReversal(array $data): InventoryLedger
     {
-        return InventoryLedger::create([
+        return $this->createLedgerEntry([
             'product_id' => $data['product_id'],
             'batch_no' => $data['batch_no'],
             'expiry_date' => $data['expiry_date'] ?? null,
@@ -305,6 +308,55 @@ class InventoryService
     }
 
     /**
+     * Record franchisee-side inventory corrections, usually approved outside
+     * purchases or their cancellation. Kept here so those flows also get batch
+     * normalization, metadata consistency checks, and negative-stock protection.
+     */
+    public function recordInventoryUpdate(array $data): InventoryLedger
+    {
+        $qty = (float) ($data['qty'] ?? 0) + (float) ($data['free_qty'] ?? 0);
+
+        if (abs($qty) <= 0.0001) {
+            throw new \InvalidArgumentException('Inventory update quantity must be non-zero.');
+        }
+
+        $createEntry = fn () => $this->createLedgerEntry([
+            'product_id' => $data['product_id'],
+            'batch_no' => $data['batch_no'],
+            'expiry_date' => $data['expiry_date'] ?? null,
+            'mfg_date' => $data['mfg_date'] ?? null,
+            'mrp' => $data['mrp'] ?? null,
+            'location_type' => 'franchisee',
+            'location_id' => $data['franchisee_id'],
+            'transaction_type' => 'ADJUSTMENT',
+            'reference_type' => 'franchisee_purchase',
+            'reference_id' => $data['reference_id'] ?? null,
+            'qty_in' => $qty > 0 ? $qty : 0,
+            'qty_out' => $qty < 0 ? abs($qty) : 0,
+            'rate' => $data['rate'] ?? null,
+            'created_by' => $data['created_by'] ?? auth()->id(),
+            'remarks' => trim(implode(' / ', array_filter([
+                $data['reason'] ?? null,
+                $data['source_document'] ?? null,
+            ]))) ?: null,
+        ]);
+
+        if ($qty > 0) {
+            return $createEntry();
+        }
+
+        return $this->deductStockIfAvailable(
+            productId: (int) $data['product_id'],
+            batchNo: (string) $data['batch_no'],
+            locationType: 'franchisee',
+            locationId: (int) $data['franchisee_id'],
+            requiredQty: abs($qty),
+            onSuccess: $createEntry,
+            insufficientMessage: "Insufficient franchise stock for product {$data['product_id']}, batch {$data['batch_no']}."
+        );
+    }
+
+    /**
      * Record a MANUAL ADJUSTMENT.
      */
     public function recordAdjustment(array $data): InventoryLedger
@@ -313,7 +365,7 @@ class InventoryService
             throw new \InvalidArgumentException('Adjustment quantity must be non-zero');
         }
         $isPositive = (float) $data['qty'] > 0;
-        $createAdjustment = fn () => InventoryLedger::create([
+        $createAdjustment = fn () => $this->createLedgerEntry([
             'product_id' => $data['product_id'],
             'batch_no' => $data['batch_no'],
             'expiry_date' => $data['expiry_date'] ?? null,
@@ -377,6 +429,8 @@ class InventoryService
             throw new \InvalidArgumentException('Required quantity must be greater than zero.');
         }
 
+        $batchNo = InventoryLedger::normalizeBatchNo($batchNo);
+
         return DB::transaction(function () use (
             $productId,
             $batchNo,
@@ -401,5 +455,81 @@ class InventoryService
 
             return $onSuccess();
         });
+    }
+
+    /**
+     * Create one immutable ledger row after normalizing the batch and enforcing
+     * one product+batch identity across the whole system.
+     */
+    private function createLedgerEntry(array $payload): InventoryLedger
+    {
+        $payload['batch_no'] = InventoryLedger::normalizeBatchNo($payload['batch_no'] ?? '');
+
+        if ($payload['batch_no'] === '') {
+            throw new \InvalidArgumentException('Batch number is required for inventory ledger entries.');
+        }
+
+        $canonical = $this->canonicalBatchMetadata((int) $payload['product_id'], $payload['batch_no']);
+
+        if ($canonical) {
+            $payload = $this->inheritMissingBatchMetadata($payload, $canonical);
+            $this->assertBatchMetadataIsConsistent($payload, $canonical);
+        }
+
+        return InventoryLedger::create($payload);
+    }
+
+    private function canonicalBatchMetadata(int $productId, string $batchNo): ?InventoryLedger
+    {
+        return InventoryLedger::query()
+            ->where('product_id', $productId)
+            ->where('batch_no', $batchNo)
+            ->where(function ($query) {
+                $query->whereNotNull('expiry_date')
+                    ->orWhereNotNull('mfg_date')
+                    ->orWhereNotNull('mrp');
+            })
+            ->oldest('id')
+            ->first();
+    }
+
+    private function inheritMissingBatchMetadata(array $payload, InventoryLedger $canonical): array
+    {
+        foreach (['expiry_date', 'mfg_date', 'mrp'] as $field) {
+            if (!array_key_exists($field, $payload) || $payload[$field] === null || $payload[$field] === '') {
+                $payload[$field] = $canonical->{$field};
+            }
+        }
+
+        return $payload;
+    }
+
+    private function assertBatchMetadataIsConsistent(array $payload, InventoryLedger $canonical): void
+    {
+        $productId = (int) $payload['product_id'];
+        $batchNo = (string) $payload['batch_no'];
+
+        foreach (['expiry_date', 'mfg_date'] as $field) {
+            if ($payload[$field] === null || $canonical->{$field} === null) {
+                continue;
+            }
+
+            if (Carbon::parse($payload[$field])->toDateString() !== $canonical->{$field}->toDateString()) {
+                throw new \DomainException(
+                    "Batch metadata conflict for product {$productId}, batch {$batchNo}: {$field} already exists as {$canonical->{$field}->toDateString()}."
+                );
+            }
+        }
+
+        if ($payload['mrp'] !== null && $canonical->mrp !== null) {
+            $incomingMrp = round((float) $payload['mrp'], 2);
+            $existingMrp = round((float) $canonical->mrp, 2);
+
+            if (abs($incomingMrp - $existingMrp) > 0.009) {
+                throw new \DomainException(
+                    "Batch metadata conflict for product {$productId}, batch {$batchNo}: mrp already exists as {$existingMrp}."
+                );
+            }
+        }
     }
 }

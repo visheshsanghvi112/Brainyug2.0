@@ -18,6 +18,7 @@ use App\Models\SaltMaster;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Services\InventoryService;
+use DomainException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
@@ -622,6 +623,101 @@ class PurchaseInvoiceControllerTest extends TestCase
                 ->where('returnSummary.remaining_returnable_qty', 4)
                 ->where('linkedReturns.0.return_number', 'PR-' . PurchaseInvoice::currentFinancialYear() . '-0103')
             );
+    }
+
+    public function test_inventory_service_normalizes_batch_numbers_and_inherits_batch_metadata(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+        $product = $this->createProduct($support, [
+            'product_name' => 'Batch Guard Product',
+            'sku' => 'BATCH-GUARD-001',
+        ]);
+
+        $inventoryService = app(InventoryService::class);
+
+        $inventoryService->recordPurchase([
+            'product_id' => $product->id,
+            'batch_no' => ' t250820 ',
+            'expiry_date' => '2027-02-01',
+            'mfg_date' => '2025-03-01',
+            'mrp' => 65,
+            'qty' => 10,
+            'free_qty' => 0,
+            'rate' => 40,
+            'reference_id' => 1001,
+            'created_by' => $user->id,
+        ]);
+
+        $inventoryService->recordDispatch([
+            'product_id' => $product->id,
+            'batch_no' => 'T250820',
+            'franchisee_id' => 123,
+            'qty' => 2,
+            'rate' => 40,
+            'order_id' => 2001,
+            'created_by' => $user->id,
+        ]);
+
+        $this->assertDatabaseHas('inventory_ledgers', [
+            'product_id' => $product->id,
+            'batch_no' => 'T250820',
+            'location_type' => 'warehouse',
+            'transaction_type' => 'PURCHASE',
+        ]);
+
+        $received = InventoryLedger::query()
+            ->where('product_id', $product->id)
+            ->where('batch_no', 'T250820')
+            ->where('location_type', 'franchisee')
+            ->where('location_id', 123)
+            ->where('transaction_type', 'RECEIVE')
+            ->firstOrFail();
+
+        $this->assertSame('2027-02-01', $received->expiry_date->toDateString());
+        $this->assertSame('2025-03-01', $received->mfg_date->toDateString());
+        $this->assertSame(65.0, (float) $received->mrp);
+    }
+
+    public function test_inventory_service_blocks_conflicting_metadata_for_existing_product_batch(): void
+    {
+        $user = $this->makeSuperAdminUser();
+        $support = $this->createSupportRecords();
+        $product = $this->createProduct($support, [
+            'product_name' => 'Duplicate Batch Product',
+            'sku' => 'DUP-BATCH-001',
+        ]);
+
+        $inventoryService = app(InventoryService::class);
+
+        $inventoryService->recordPurchase([
+            'product_id' => $product->id,
+            'batch_no' => 'T250820',
+            'expiry_date' => '2027-02-01',
+            'mfg_date' => '2025-03-01',
+            'mrp' => 65,
+            'qty' => 10,
+            'free_qty' => 0,
+            'rate' => 40,
+            'reference_id' => 1001,
+            'created_by' => $user->id,
+        ]);
+
+        $this->expectException(DomainException::class);
+        $this->expectExceptionMessage('Batch metadata conflict');
+
+        $inventoryService->recordPurchase([
+            'product_id' => $product->id,
+            'batch_no' => 'T250820',
+            'expiry_date' => '2027-02-01',
+            'mfg_date' => '2025-03-01',
+            'mrp' => 60.94,
+            'qty' => 5,
+            'free_qty' => 0,
+            'rate' => 35,
+            'reference_id' => 1002,
+            'created_by' => $user->id,
+        ]);
     }
 
     private function makeSuperAdminUser(): User

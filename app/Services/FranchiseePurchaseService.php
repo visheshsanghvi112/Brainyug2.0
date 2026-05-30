@@ -104,6 +104,7 @@ class FranchiseePurchaseService
                     'franchisee_id' => $purchase->franchisee_id,
                     'qty' => $item->qty,
                     'free_qty' => $item->free_qty,
+                    'reference_id' => $purchase->id,
                     'reason' => 'Outside Purchase Approved',
                     'source_document' => $purchase->transaction_number,
                     'created_by' => $approver->id,
@@ -193,6 +194,7 @@ class FranchiseePurchaseService
                     'franchisee_id' => $purchase->franchisee_id,
                     'qty' => -$item->qty, // Negative to reverse
                     'free_qty' => -$item->free_qty,
+                    'reference_id' => $purchase->id,
                     'reason' => "Cancellation: {$reason}",
                     'source_document' => "{$purchase->transaction_number}-CANCEL",
                     'created_by' => $canceller->id,

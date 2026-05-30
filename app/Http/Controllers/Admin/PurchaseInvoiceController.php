@@ -509,6 +509,8 @@ class PurchaseInvoiceController extends Controller
             $nearExpiryCount = $this->purchaseInvoiceLifecycleService->approve($purchaseInvoice, $request->user());
         } catch (ValidationException $e) {
             return back()->withErrors($e->errors());
+        } catch (\DomainException $e) {
+            return back()->withErrors(['items' => $e->getMessage()]);
         }
 
         $message = 'Invoice approved. Stock added to warehouse and supplier payable recorded.';
@@ -528,6 +530,8 @@ class PurchaseInvoiceController extends Controller
             $this->purchaseInvoiceLifecycleService->cancel($purchaseInvoice, $request->user());
         } catch (ValidationException $e) {
             return back()->withErrors($e->errors());
+        } catch (\DomainException $e) {
+            return back()->withErrors(['status' => $e->getMessage()]);
         }
 
         return back()->with('success', 'Invoice cancelled.');

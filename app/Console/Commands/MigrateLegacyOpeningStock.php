@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Helpers\LegacySqlReader;
+use App\Models\InventoryLedger;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -65,7 +66,9 @@ class MigrateLegacyOpeningStock extends Command
             ->where('transaction_type', 'OPENING')
             ->select('product_id', 'batch_no', 'location_type', 'location_id')
             ->get()
-            ->mapWithKeys(fn($r) => ["{$r->product_id}|{$r->batch_no}|{$r->location_type}|{$r->location_id}" => true])
+            ->mapWithKeys(fn($r) => [
+                "{$r->product_id}|" . InventoryLedger::normalizeBatchNo($r->batch_no) . "|{$r->location_type}|{$r->location_id}" => true,
+            ])
             ->toArray();
         $this->line('  ' . count($existingOpenings) . ' existing OPENING entries (will be skipped).');
 
@@ -125,7 +128,7 @@ class MigrateLegacyOpeningStock extends Command
 
         foreach (LegacySqlReader::streamTableRows($sqlFile, 'purchase_challan_product') as $row) {
             $proId    = (int) ($row['pro_id'] ?? 0);
-            $batch    = trim($row['batch'] ?? '');
+            $batch    = InventoryLedger::normalizeBatchNo($row['batch'] ?? '');
 
             if ($proId <= 0 || $batch === '') {
                 continue;
@@ -168,7 +171,7 @@ class MigrateLegacyOpeningStock extends Command
 
         foreach (LegacySqlReader::streamTableRows($sqlFile, $tableName) as $row) {
             $productId = (int) ($row['product_id'] ?? 0);
-            $batchNo   = trim($row['batch_no'] ?? '');
+            $batchNo   = InventoryLedger::normalizeBatchNo($row['batch_no'] ?? '');
             $qty       = $this->sanitizeDecimal($row['actual_stock'] ?? '0');
 
             // Skip zero/negative stock — no point creating a zero OPENING entry
@@ -271,7 +274,7 @@ class MigrateLegacyOpeningStock extends Command
         foreach (LegacySqlReader::streamTableRows($sqlFile, 'pharma_tbl_stock') as $row) {
             $legacyFranchId = (int) ($row['franch_id'] ?? 0);
             $productId      = (int) ($row['product_id'] ?? 0);
-            $batchNo        = trim($row['batch_no'] ?? '');
+            $batchNo        = InventoryLedger::normalizeBatchNo($row['batch_no'] ?? '');
             $qty            = $this->sanitizeDecimal($row['actual_stock'] ?? '0');
 
             if ($productId <= 0 || $batchNo === '' || $qty <= 0) {

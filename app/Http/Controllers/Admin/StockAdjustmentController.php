@@ -61,17 +61,21 @@ class StockAdjustmentController extends Controller
             ? abs($validated['qty'])
             : -abs($validated['qty']);
 
-        $inventoryService->recordAdjustment([
-            'product_id'   => $validated['product_id'],
-            'batch_no'     => $validated['batch_no'],
-            'expiry_date'  => $validated['exp_date'],
-            'location_type'=> $validated['location_type'],
-            'location_id'  => $validated['location_id'],
-            'qty'          => $qty,
-            'rate'         => $validated['unit_cost'] ?? 0,
-            'remarks'      => $validated['reason'],
-            'created_by'   => $request->user()->id,
-        ]);
+        try {
+            $inventoryService->recordAdjustment([
+                'product_id'   => $validated['product_id'],
+                'batch_no'     => $validated['batch_no'],
+                'expiry_date'  => $validated['exp_date'],
+                'location_type'=> $validated['location_type'],
+                'location_id'  => $validated['location_id'],
+                'qty'          => $qty,
+                'rate'         => $validated['unit_cost'] ?? 0,
+                'remarks'      => $validated['reason'],
+                'created_by'   => $request->user()->id,
+            ]);
+        } catch (\DomainException $e) {
+            return back()->withErrors(['batch_no' => $e->getMessage()])->withInput();
+        }
 
         return back()->with('success', 'Stock adjusted successfully. Inventory ledger updated.');
     }

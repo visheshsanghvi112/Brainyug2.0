@@ -1,3 +1,68 @@
+<template>
+  <div>
+    <h1 class="text-2xl font-semibold mb-4">Dashboard</h1>
+
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <Card>
+        <div class="text-sm text-muted">Revenue</div>
+        <div class="text-xl font-bold">₹ 1,24,000</div>
+      </Card>
+
+      <Card>
+        <div class="text-sm text-muted">Orders</div>
+        <div class="text-xl font-bold">1,342</div>
+      </Card>
+
+      <Card>
+        <div class="text-sm text-muted">Low stock</div>
+        <div class="text-xl font-bold">24</div>
+      </Card>
+    </div>
+
+    <div>
+      <Card>
+        <h2 class="text-lg font-semibold mb-2">Recent Orders</h2>
+        <table class="w-full text-left">
+          <thead>
+            <tr class="text-sm text-muted">
+              <th class="py-2">Order</th>
+              <th class="py-2">Customer</th>
+              <th class="py-2">Amount</th>
+              <th class="py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="py-2">#1001</td>
+              <td class="py-2">Acme Corp</td>
+              <td class="py-2">₹ 12,400</td>
+              <td class="py-2">Shipped</td>
+            </tr>
+            <tr>
+              <td class="py-2">#1000</td>
+              <td class="py-2">Global Meds</td>
+              <td class="py-2">₹ 8,200</td>
+              <td class="py-2">Pending</td>
+            </tr>
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  </div>
+</template>
+
+<script>
+import MainLayout from '@/Components/Layout/MainLayout.vue';
+import Card from '../Components/ui/Card.vue';
+
+export default {
+  layout: MainLayout,
+  components: { Card },
+};
+</script>
+
+<style scoped>
+</style>
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';

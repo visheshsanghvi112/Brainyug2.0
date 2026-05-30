@@ -28,6 +28,16 @@ class InventoryLedger extends Model
         'rate' => 'decimal:2',
     ];
 
+    public static function normalizeBatchNo(?string $batchNo): string
+    {
+        return strtoupper(trim((string) $batchNo));
+    }
+
+    public function setBatchNoAttribute($value): void
+    {
+        $this->attributes['batch_no'] = self::normalizeBatchNo($value);
+    }
+
     public function product() { return $this->belongsTo(Product::class); }
     public function createdBy() { return $this->belongsTo(User::class, 'created_by'); }
 

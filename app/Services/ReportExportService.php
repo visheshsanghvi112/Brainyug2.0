@@ -30,7 +30,7 @@ class ReportExportService
 
             // Add headers
             foreach ($headers as $idx => $header) {
-                $sheet->setCellValue([$idx + 1, 1], $header);
+                $sheet->setCellValueByColumnAndRow($idx + 1, 1, $header);
             }
 
             // Style header row
@@ -52,7 +52,7 @@ class ReportExportService
                 
                 foreach ($chunk as $row) {
                     foreach (array_values($row) as $colIdx => $value) {
-                        $sheet->setCellValue([$colIdx + 1, $rowNo], $value);
+                        $sheet->setCellValueByColumnAndRow($colIdx + 1, $rowNo, $value);
                     }
                     $rowNo++;
                 }
@@ -67,8 +67,8 @@ class ReportExportService
             if (!empty($meta)) {
                 $rowNo += 1;
                 foreach ($meta as $label => $value) {
-                    $sheet->setCellValue([1, $rowNo], (string) $label);
-                    $sheet->setCellValue([2, $rowNo], (string) $value);
+                    $sheet->setCellValueByColumnAndRow(1, $rowNo, (string) $label);
+                    $sheet->setCellValueByColumnAndRow(2, $rowNo, (string) $value);
                     $sheet->getStyle('A' . $rowNo)->getFont()->setBold(true);
                     $rowNo++;
                 }

@@ -16,6 +16,12 @@ export default {
             fontFamily: {
                 sans: ['Figtree', ...defaultTheme.fontFamily.sans],
             },
+            colors: {
+                primary: 'rgb(var(--color-primary) / <alpha-value>)',
+                'primary-600': 'rgb(var(--color-primary-600) / <alpha-value>)',
+                muted: 'rgb(var(--color-muted) / <alpha-value>)',
+                surface: 'rgb(var(--color-surface) / <alpha-value>)',
+            },
         },
     },
 
